@@ -351,10 +351,26 @@ export function LabPage(): JSX.Element {
           </div>
 
           <div className="panel">
+            {state.phase === "done" && meta && (
+              <ul className="verdict-list">
+                <li>container verify: valid</li>
+                <li>reconstructed SHA-256 == original SHA-256: exact match</li>
+                {state.reconstructedWebSha !== null && <li>independent WebCrypto SHA-256 == codec SHA-256: match</li>}
+                {state.corrupt && !state.corrupt.valid && <li>corrupted copy rejected: detected</li>}
+                <li>✓ Transfer-in-a-box complete</li>
+              </ul>
+            )}
             {reconstructedMatch ? (
               <div className="success">✓ Done — the file comes back out exactly as it went in, quality untouched.</div>
             ) : (
               state.phase === "error" && <div className="error-banner">✗ {state.error}</div>
+            )}
+            {state.phase === "done" && reconstructedMatch && meta && (
+              <div className="row">
+                <button className="btn" onClick={() => download(meta.fileName, reconstructedRef.current)}>
+                  Download reconstructed original
+                </button>
+              </div>
             )}
           </div>
         </>

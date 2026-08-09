@@ -1,6 +1,8 @@
+/* global BufferSource */
 import { useCallback, useRef, useState, type JSX } from "react";
 import { encodeZui, verifyZui, ZuiDecoder, probeCompressible, type ByteSink, type ByteSource } from "@codec/index";
 import { ShareCard } from "./ShareCard";
+import { createOpfsOutFile, downloadOpfsFile, opfsAvailable, type OpfsOutFile } from "./opfs";
 
 const formatBytes = (n: number): string => {
   if (n < 1024) return `${n} B`;
@@ -36,12 +38,16 @@ const fileSource = (file: File, onProgress?: (frac: number) => void): ByteSource
   };
 };
 
-function download(name: string, blobParts: BlobPart[], type: string): void {
-  const url = URL.createObjectURL(new Blob(blobParts, { type }));
+function triggerDownload(name: string, url: string): void {
   const a = document.createElement("a");
   a.href = url;
   a.download = name;
   a.click();
+}
+
+function downloadBlob(name: string, blobParts: BlobPart[], type: string): void {
+  const url = URL.createObjectURL(new Blob(blobParts, { type }));
+  triggerDownload(name, url);
   setTimeout(() => URL.revokeObjectURL(url), 10_000);
 }
 
@@ -50,7 +56,8 @@ interface WrapResult {
   originalSize: number;
   containerName: string;
   containerSize: number;
-  containerParts: Uint8Array[];
+  url?: string;
+  opfs?: OpfsOutFile;
 }
 
 interface UnwrapResult {
@@ -76,23 +83,16 @@ export function SendPage(): JSX.Element {
 
   const [dragOver, setDragOver] = useState<"wrap" | "conv" | null>(null);
   const busy = useRef(false);
+  const wrapFileRef = useRef<File | null>(null);
 
   const wrap = useCallback(async (f: File | null) => {
     if (!f || busy.current) return;
     busy.current = true;
+    wrapFileRef.current = f;
     setWrapState("busy");
     setWrapProgress(0);
     setWrapResult(null);
     setWrapError(undefined);
-    const parts: Uint8Array[] = [];
-    let total = 0;
-    const sink: ByteSink = {
-      write: (b) => {
-        const copy = Uint8Array.from(b);
-        parts.push(copy);
-        total += copy.byteLength;
-      },
-    };
     try {
       // Instant path: already-compressed media (video/audio/archives) is
       // entropy-probed and packaged WITHOUT deflate — no CPU burn on 2GB.
@@ -100,6 +100,32 @@ export function SendPage(): JSX.Element {
       const compression =
         probeCompressible(probeSample) || f.size <= 8 * 1024 * 1024 ? "deflate-raw" : ("none" as const);
       setWrapMode(compression);
+
+      // Disk-backed output: the container streams to OPFS and the download
+      // streams from there — a multi-GB wrap never lives fully in RAM.
+      let total = 0;
+      let opfsOut: OpfsOutFile | null = null;
+      const memoryParts: Uint8Array[] = [];
+      const useOpfs = await opfsAvailable();
+      let sink: ByteSink;
+      if (useOpfs) {
+        opfsOut = await createOpfsOutFile("zui-wrap");
+        sink = {
+          write: (b) => {
+            total += b.byteLength;
+            return opfsOut!.writable.write(b as unknown as BufferSource);
+          },
+        };
+      } else {
+        sink = {
+          write: (b) => {
+            memoryParts.push(Uint8Array.from(b));
+            total += b.byteLength;
+            return Promise.resolve();
+          },
+        };
+      }
+
       await encodeZui(
         () => fileSource(f, setWrapProgress),
         {
@@ -109,15 +135,26 @@ export function SendPage(): JSX.Element {
         },
         sink
       );
-      if (total <= 0 || parts.length === 0) throw new Error("empty container produced");
-      setWrapResult({
+      if (total <= 0) throw new Error("empty container produced");
+
+      const containerName = `${f.name}.zui`;
+      const result: WrapResult = {
         originalName: f.name,
         originalSize: f.size,
-        containerName: `${f.name}.zui`,
+        containerName,
         containerSize: total,
-        containerParts: parts,
-      });
+        ...(opfsOut ? { opfs: opfsOut } : {}),
+      };
+      if (!opfsOut) {
+        result.url = URL.createObjectURL(new Blob(memoryParts as unknown as BlobPart[], { type: "application/octet-stream" }));
+      }
+      setWrapResult(result);
       setWrapState("done");
+
+      if (opfsOut) {
+        // Instant download: streams from disk, no memory spike.
+        await downloadOpfsFile(opfsOut, containerName);
+      }
     } catch (err) {
       setWrapState("error");
       setWrapError((err as Error).message);
@@ -125,6 +162,13 @@ export function SendPage(): JSX.Element {
       busy.current = false;
     }
   }, []);
+
+  const redownload = useCallback(() => {
+    const r = wrapResult;
+    if (!r) return;
+    if (r.opfs) void downloadOpfsFile(r.opfs, r.containerName);
+    else if (r.url) triggerDownload(r.containerName, r.url);
+  }, [wrapResult]);
 
   const convert = useCallback(async (f: File | null) => {
     if (!f || busy.current) return;
@@ -159,12 +203,16 @@ export function SendPage(): JSX.Element {
     }
   }, []);
 
+  const wrapPct = Math.round(wrapProgress * 100);
+  const wrapBytes = Math.round((wrapFileRef.current?.size ?? 0) * wrapProgress);
+
   return (
     <section className="send">
       <h1>Make it a ZUI file</h1>
       <p className="description">
         Drop any file and get a compressed <strong>.zui</strong> container to download. Drop a{" "}
-        <strong>.zui</strong> back in the box and get the exact original file. Runs in your browser.
+        <strong>.zui</strong> back in the box and get the exact original file. Runs in your browser and
+        streams to disk — a 2&nbsp;GB file never lives fully in memory.
       </p>
 
       <div className="panel">
@@ -203,14 +251,20 @@ export function SendPage(): JSX.Element {
               <div className="dropzone-subtitle">Drag &amp; drop or click to browse</div>
             </>
           )}
-          {wrapState === "busy" && (
-            <div className="hash-progress">
-              {wrapMode === "none"
-                ? `packaging (already-compressed — deflate skipped)… ${Math.round(wrapProgress * 100)}%`
-                : `compressing… ${Math.round(wrapProgress * 100)}%`}
-            </div>
-          )}
         </div>
+
+        {wrapState === "busy" && (
+          <div className="progress-wrap">
+            <div className="progress-bar">
+              <div className="progress-fill" style={{ width: `${wrapPct}%` }} />
+            </div>
+            <span className="progress-label">
+              {wrapMode === "none"
+                ? `packaging ${formatBytes(wrapBytes)} / ${formatBytes(wrapFileRef.current?.size ?? 0)} — deflate skipped… ${wrapPct}%`
+                : `compressing ${formatBytes(wrapBytes)} / ${formatBytes(wrapFileRef.current?.size ?? 0)}… ${wrapPct}%`}
+            </span>
+          </div>
+        )}
 
         {wrapState === "error" && <p className="resume-msg">Error: {wrapError}</p>}
 
@@ -218,12 +272,9 @@ export function SendPage(): JSX.Element {
           <div className="wrap-result">
             <p className="wrap-line">
               Compressed {formatBytes(wrapResult.originalSize)} → {formatBytes(wrapResult.containerSize)}.
-              Download the container:
+              {wrapResult.opfs && " The download started — check your downloads folder."}
             </p>
-            <button
-              className="btn-download"
-              onClick={() => download(wrapResult.containerName, wrapResult.containerParts as BlobPart[], "application/octet-stream")}
-            >
+            <button className="btn-download" onClick={redownload}>
               Download {wrapResult.containerName}
             </button>
           </div>
@@ -271,6 +322,15 @@ export function SendPage(): JSX.Element {
           )}
         </div>
 
+        {convState === "busy" && (
+          <div className="progress-wrap">
+            <div className="progress-bar">
+              <div className="progress-fill" style={{ width: `${Math.round(convProgress * 100)}%` }} />
+            </div>
+            <span className="progress-label">verifying &amp; restoring… {Math.round(convProgress * 100)}%</span>
+          </div>
+        )}
+
         {convState === "error" && <p className="resume-msg">Error: {convError}</p>}
 
         {convState === "done" && convResult && (
@@ -278,7 +338,7 @@ export function SendPage(): JSX.Element {
             <p className="wrap-line">Original file restored with its type — download it:</p>
             <button
               className="btn-download"
-              onClick={() => download(convResult.fileName, convResult.parts as BlobPart[], "application/octet-stream")}
+              onClick={() => downloadBlob(convResult.fileName, convResult.parts as unknown as BlobPart[], "application/octet-stream")}
             >
               Download {convResult.fileName}
             </button>

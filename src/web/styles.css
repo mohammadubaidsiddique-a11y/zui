@@ -195,6 +195,16 @@ table.chunks { border-collapse: collapse; width: 100%; font-size: 13px; }
   font-weight: 600;
 }
 
+.verdict-list {
+  margin: 0 0 14px;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+}
+.verdict-list li::before { content: "✓ "; color: #1a7f37; font-weight: 700; }
+
 .visually-hidden {
   position: absolute; width: 1px; height: 1px;
   clip: rect(0 0 0 0); overflow: hidden; white-space: nowrap;
