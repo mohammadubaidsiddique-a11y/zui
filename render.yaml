@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: zui
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: ZUI_HOST
+        value: 0.0.0.0
+      - key: ZUI_WEB_DIST
+        value: dist/web
+      - key: ZUI_MAX_SESSION_BYTES
+        value: "17179869184"
