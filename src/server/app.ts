@@ -265,6 +265,43 @@ export function createApp(ctx: ZuiAppContext): express.Express {
       next(err);
     }
   });
+
+  // Chunked staging for large payloads (every browser, any size): create →
+  // ordered chunk uploads → finalize → same-origin GET.
+  api.post("/local-download/chunked", limits.general, async (req, res, next) => {
+    try {
+      let rawName = "";
+      try {
+        rawName = typeof req.headers["x-zui-filename"] === "string" ? decodeURIComponent(req.headers["x-zui-filename"]) : "";
+      } catch {
+        rawName = "";
+      }
+      if (rawName.length > 512) throw new ApiError("file name too long", 400, "bad_request");
+      const mime = (req.headers["content-type"] ?? "application/octet-stream").split(";")[0].trim();
+      const { id } = await tempDownloads.createChunked(rawName, mime);
+      res.status(201).json({ id });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  api.post("/local-download/chunked/:id/chunk", limits.chunks, async (req, res, next) => {
+    try {
+      const { bytes } = await tempDownloads.append(req.params.id as string, req, config.maxSessionBytes);
+      res.json({ bytes });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  api.post("/local-download/chunked/:id/finalize", limits.general, async (req, res, next) => {
+    try {
+      const { url, bytes } = await tempDownloads.finalize(req.params.id as string);
+      res.json({ url, bytes });
+    } catch (err) {
+      next(err);
+    }
+  });
   app.get("/health", (_req, res) => {
     res.json({ ok: true, service: "zui", storage: storage.kind, time: new Date().toISOString() });
   });

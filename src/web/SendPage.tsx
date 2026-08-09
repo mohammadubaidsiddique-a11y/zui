@@ -3,7 +3,7 @@ import { useCallback, useRef, useState, type JSX } from "react";
 import { encodeZui, verifyZui, ZuiDecoder, probeCompressible, type ByteSink, type ByteSource } from "@codec/index";
 import { ShareCard } from "./ShareCard";
 import { createOpfsOutFile, downloadOpfsFile, opfsAvailable, readOpfsBytes, type OpfsOutFile } from "./opfs";
-import { downloadBlob } from "./download";
+import { downloadBlob, type DownloadReport } from "./download";
 
 const formatBytes = (n: number): string => {
   if (n < 1024) return `${n} B`;
@@ -68,10 +68,18 @@ export function SendPage(): JSX.Element {
   const [convState, setConvState] = useState<JobState>("idle");
   const [convProgress, setConvProgress] = useState(0);
   const [convError, setConvError] = useState<string | undefined>();
+  const [dlReport, setDlReport] = useState<DownloadReport | null>(null);
 
   const [dragOver, setDragOver] = useState<"wrap" | "conv" | null>(null);
   const busy = useRef(false);
   const wrapFileRef = useRef<File | null>(null);
+
+  const reportDownload = (r: DownloadReport): void => {
+    setDlReport(r);
+    if (r.ok) {
+      window.setTimeout(() => setDlReport(null), 15_000);
+    }
+  };
 
   const wrap = useCallback(async (f: File | null) => {
     if (!f || busy.current) return;
@@ -155,11 +163,12 @@ export function SendPage(): JSX.Element {
     // Reliable ladder: native picker → server-mediated → anchor. Never a
     // silent no-op or a zero-byte file.
     if (r.opfs) {
-      void readOpfsBytes(r.opfs).then((buf) =>
-        downloadBlob(r.containerName, [buf as unknown as BlobPart], "application/octet-stream")
-      );
+      void readOpfsBytes(r.opfs)
+        .then((buf) => downloadBlob(r.containerName, [buf as unknown as BlobPart], "application/octet-stream"))
+        .then(reportDownload)
+        .catch((err) => setDlReport({ ok: false, via: "none", error: (err as Error).message }));
     } else if (r.parts) {
-      void downloadBlob(r.containerName, r.parts as unknown as BlobPart[], "application/octet-stream");
+      void downloadBlob(r.containerName, r.parts as unknown as BlobPart[], "application/octet-stream").then(reportDownload);
     }
   }, [wrapResult]);
 
@@ -188,6 +197,9 @@ export function SendPage(): JSX.Element {
       }
       setConvResult({ fileName: decoder.header.fileName || f.name.replace(/\.zui$/, ""), size, parts });
       setConvState("done");
+      if (size <= 0) {
+        setDlReport({ ok: false, via: "none", error: "restored 0 bytes — the container holds no data" });
+      }
     } catch (err) {
       setConvState("error");
       setConvError((err as Error).message);
@@ -270,6 +282,13 @@ export function SendPage(): JSX.Element {
             <button className="btn-download" onClick={redownload}>
               Download {wrapResult.containerName}
             </button>
+            {dlReport && (
+              <p className={`resume-msg${dlReport.ok ? " dl-ok" : ""}`}>
+                {dlReport.ok
+                  ? `✓ ${wrapResult.containerName} (${formatBytes(dlReport.bytes)}) — download started via ${dlReport.via}. If nothing appears, click Download again.`
+                  : `✗ download failed: ${dlReport.error}`}
+              </p>
+            )}
           </div>
         )}
       </div>
@@ -328,13 +347,27 @@ export function SendPage(): JSX.Element {
 
         {convState === "done" && convResult && (
           <div className="wrap-result">
-            <p className="wrap-line">Original file restored with its type — download it:</p>
+            <p className="wrap-line">
+              Original restored: <strong>{formatBytes(convResult.size)}</strong> — verified and saved with its
+              original name <strong>{convResult.fileName}</strong>. Download it:
+            </p>
             <button
               className="btn-download"
-              onClick={() => void downloadBlob(convResult.fileName, convResult.parts as unknown as BlobPart[], "application/octet-stream")}
+              onClick={() =>
+                void downloadBlob(convResult.fileName, convResult.parts as unknown as BlobPart[], "application/octet-stream").then(
+                  reportDownload
+                )
+              }
             >
               Download {convResult.fileName}
             </button>
+            {dlReport && (
+              <p className={`resume-msg${dlReport.ok ? " dl-ok" : ""}`}>
+                {dlReport.ok
+                  ? `✓ ${convResult.fileName} (${formatBytes(dlReport.bytes)}) — download started via ${dlReport.via}. If nothing appears, click Download again.`
+                  : `✗ download failed: ${dlReport.error}`}
+              </p>
+            )}
           </div>
         )}
       </div>
