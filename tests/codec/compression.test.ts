@@ -1,6 +1,6 @@
 import { describe, expect, it, beforeAll } from "vitest";
 import { registerNodeCodecAdapters } from "@codec/node-adapters";
-import { encodeZui, verifyZui, ZuiDecoder, decompressChunk, compressChunk, chunkCountFor, rawSizeAt, chunkStartByte } from "@codec/index";
+import { encodeZui, verifyZui, ZuiDecoder, decompressChunk, compressChunk, chunkCountFor, rawSizeAt, chunkStartByte, probeCompressible } from "@codec/index";
 import { randomBytes } from "node:crypto";
 import { concatParts, type ByteSource } from "@codec/streams";
 
@@ -67,6 +67,15 @@ describe("deflate-raw compression", () => {
     const rebuilt: Uint8Array[] = [];
     for await (const chunk of decoder.reconstruct()) rebuilt.push(chunk);
     expect(concatParts(rebuilt)).toEqual(src);
+  });
+
+  it("probes compressibility so already-compressed media skips deflate", () => {
+    const text = new TextEncoder().encode("the quick brown fox jumps over the lazy dog ".repeat(200));
+    expect(probeCompressible(text)).toBe(true);
+    const random = randomBytes(4096);
+    expect(probeCompressible(random)).toBe(false);
+    const empty = new Uint8Array(0);
+    expect(probeCompressible(empty)).toBe(true);
   });
 
   it("exposes compress/decompress helpers", async () => {

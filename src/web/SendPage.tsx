@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState, type JSX } from "react";
-import { encodeZui, verifyZui, ZuiDecoder, type ByteSink, type ByteSource } from "@codec/index";
+import { encodeZui, verifyZui, ZuiDecoder, probeCompressible, type ByteSink, type ByteSource } from "@codec/index";
 import { ShareCard } from "./ShareCard";
 
 const formatBytes = (n: number): string => {
@@ -66,6 +66,7 @@ export function SendPage(): JSX.Element {
   const [wrapState, setWrapState] = useState<JobState>("idle");
   const [wrapProgress, setWrapProgress] = useState(0);
   const [wrapError, setWrapError] = useState<string | undefined>();
+  const [wrapMode, setWrapMode] = useState<"deflate-raw" | "none">("deflate-raw");
 
   const [convFile, setConvFile] = useState<File | null>(null);
   const [convResult, setConvResult] = useState<UnwrapResult | null>(null);
@@ -93,12 +94,18 @@ export function SendPage(): JSX.Element {
       },
     };
     try {
+      // Instant path: already-compressed media (video/audio/archives) is
+      // entropy-probed and packaged WITHOUT deflate — no CPU burn on 2GB.
+      const probeSample = new Uint8Array(await f.slice(0, Math.min(f.size, 512 * 1024)).arrayBuffer());
+      const compression =
+        probeCompressible(probeSample) || f.size <= 8 * 1024 * 1024 ? "deflate-raw" : ("none" as const);
+      setWrapMode(compression);
       await encodeZui(
         () => fileSource(f, setWrapProgress),
         {
           fileName: f.name,
           mimeType: f.type || "application/octet-stream",
-          compression: "deflate-raw",
+          compression,
         },
         sink
       );
@@ -196,7 +203,13 @@ export function SendPage(): JSX.Element {
               <div className="dropzone-subtitle">Drag &amp; drop or click to browse</div>
             </>
           )}
-          {wrapState === "busy" && <div className="hash-progress">compressing… {Math.round(wrapProgress * 100)}%</div>}
+          {wrapState === "busy" && (
+            <div className="hash-progress">
+              {wrapMode === "none"
+                ? `packaging (already-compressed — deflate skipped)… ${Math.round(wrapProgress * 100)}%`
+                : `compressing… ${Math.round(wrapProgress * 100)}%`}
+            </div>
+          )}
         </div>
 
         {wrapState === "error" && <p className="resume-msg">Error: {wrapError}</p>}

@@ -150,11 +150,21 @@ export async function encodeZui(
   const chunks: ChunkRecord[] = [];
   let origSize = 0;
 
-  const flushChunk = async (raw: Uint8Array): Promise<void> => {
-    const stored = compression === "deflate-raw" ? await compressChunk(compression, raw) : raw;
-    const storedSha256 = await createSha256().update(stored).digestHex();
-    await store.write(stored);
-    chunks.push({ index: chunks.length, storedSize: stored.byteLength, storedSha256, rawSize: raw.byteLength });
+  // Order-preserving parallel compression: chunks are independent, so a small
+  // batch compresses concurrently while bytes are stored in original order.
+  const COMPRESS_CONCURRENCY = 4;
+  const pending: Array<Promise<{ raw: Uint8Array; stored: Uint8Array }>> = [];
+  const enqueue = (raw: Uint8Array): void => {
+    pending.push(compressChunk(compression, raw).then((stored) => ({ raw, stored })));
+  };
+  const drain = async (): Promise<void> => {
+    const batch = await Promise.all(pending);
+    pending.length = 0;
+    for (const { raw, stored } of batch) {
+      const storedSha256 = await createSha256().update(stored).digestHex();
+      await store.write(stored);
+      chunks.push({ index: chunks.length, storedSize: stored.byteLength, storedSha256, rawSize: raw.byteLength });
+    }
   };
 
   for await (const part of source) {
@@ -162,11 +172,13 @@ export async function encodeZui(
     origSize += part.byteLength;
     acc.push(part);
     while (acc.len >= chunkSize) {
-      await flushChunk(acc.consume(chunkSize));
+      enqueue(acc.consume(chunkSize));
+      if (pending.length >= COMPRESS_CONCURRENCY) await drain();
     }
   }
   const tail = acc.remainder();
-  if (tail.byteLength > 0) await flushChunk(tail);
+  if (tail.byteLength > 0) enqueue(tail);
+  await drain();
 
   const origSha256 = await origHasher.digestHex();
 

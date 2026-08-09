@@ -17,6 +17,29 @@ export function parseCompressionName(name: string): CompressionMode {
   throw new Error(`unsupported compression mode "${name}"`);
 }
 
+const ENTROPY_CUTOFF = 7.4; // bits per byte; above ~this deflate gains nothing
+
+/**
+ * Cheap compressibility probe: byte-entropy over a sample. Already-compressed
+ * media (video, audio, JPEG, PNG, archives) is ~8 bits/byte — deflating it
+ * costs CPU and memory for a fraction of a percent. Text and logs (~4-6
+ * bits/byte) get a big win. Used to skip compression on files where it can't
+ * help, so huge media files package instantly.
+ */
+export function probeCompressible(sample: Uint8Array): boolean {
+  if (sample.byteLength === 0) return true;
+  const freq = new Uint32Array(256);
+  for (let i = 0; i < sample.byteLength; i += 1) freq[sample[i]!]! += 1;
+  let entropy = 0;
+  for (let i = 0; i < 256; i += 1) {
+    const c = freq[i]!;
+    if (c === 0) continue;
+    const p = c / sample.byteLength;
+    entropy -= p * Math.log2(p);
+  }
+  return entropy <= ENTROPY_CUTOFF;
+}
+
 interface NativeDeflater {
   compress(bytes: Uint8Array): Promise<Uint8Array>;
   inflate(bytes: Uint8Array): Promise<Uint8Array>;

@@ -14,6 +14,7 @@ export {
   compressChunk,
   decompressChunk,
   parseCompressionName,
+  probeCompressible,
   registerNativeDeflater,
 } from "./compress";
 export type { CompressionMode } from "./compress";
