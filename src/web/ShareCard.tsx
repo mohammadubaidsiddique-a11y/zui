@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState, type JSX } from "react";
+import { useCallback, useEffect, useRef, useState, type JSX } from "react";
 import { compressionSupported, compressChunk, createSha256 } from "@codec/index";
 
 const fmt = (n: number): string => {
@@ -32,6 +32,14 @@ export function ShareCard(): JSX.Element {
   const compressionSupportedHere = compressionSupported("deflate-raw");
   const abortRef = useRef(false);
   const wireRef = useRef<"none" | "deflate-raw">("none");
+
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    if (phase !== "hashing" && phase !== "uploading") return;
+    const t0 = Date.now();
+    const id = setInterval(() => setElapsed(Math.round((Date.now() - t0) / 1000)), 1000);
+    return () => clearInterval(id);
+  }, [phase]);
 
   const streamHash = useCallback(async (f: File, onProgress: (frac: number) => void): Promise<string> => {
     const hasher = createSha256();
@@ -222,10 +230,19 @@ export function ShareCard(): JSX.Element {
         </label>
       )}
 
+      {(phase === "hashing" || phase === "uploading") && (
+        <div className="pipeline">
+          <span className="pipe-step done">1 · compress</span>
+          <span className={`pipe-step${phase === "hashing" ? " pending" : " active"}`}>2 · travel</span>
+          <span className="pipe-step pending">3 · restore</span>
+          <span className="pipe-time">{elapsed}s elapsed</span>
+        </div>
+      )}
+
       {phase === "hashing" && (
         <div className="progress-wrap">
           <div className="progress-bar"><div className="progress-fill" style={{ width: `${Math.round(progress * 100)}%` }} /></div>
-          <span className="progress-label">hashing the file (pass 1/2)… {Math.round(progress * 100)}%</span>
+          <span className="progress-label">analyzing the file (pass 1/2 — checksum)… {Math.round(progress * 100)}%</span>
         </div>
       )}
 

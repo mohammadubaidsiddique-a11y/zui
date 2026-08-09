@@ -48,6 +48,7 @@ class PureSha256 implements HashLike {
   private buf = new Uint8Array(64);
   private buflen = 0;
   private totalBytes = 0;
+  private sched = new Uint32Array(64);
 
   update(bytes: Uint8Array): this {
     this.totalBytes += bytes.length;
@@ -76,7 +77,7 @@ class PureSha256 implements HashLike {
   }
 
   private compress(p: Uint8Array): void {
-    const w = new Uint32Array(64);
+    const w = this.sched;
     for (let i = 0; i < 16; i += 1) {
       const j = i * 4;
       w[i] = ((p[j]! << 24) | (p[j + 1]! << 16) | (p[j + 2]! << 8) | p[j + 3]!) >>> 0;

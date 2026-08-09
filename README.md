@@ -20,6 +20,9 @@ works.
   completed chunks.
 - **Proven integrity** — reconstruction is only reported as complete when
   `SHA-256(reconstructed) == SHA-256(original)`.
+- **Compress → travel → enhance** — an optional transparent pipeline: the file
+  is deflated (per chunk) before it travels, so less bytes cross the wire, and
+  the receiver verifies and restores the exact original bytes.
 
 ### Honest claims
 

@@ -3,7 +3,7 @@ import react from "@vitejs/plugin-react";
 import tsconfigPaths from "vite-tsconfig-paths";
 import { fileURLToPath } from "node:url";
 
-const apiPort = process.env.ZUI_PORT ?? "3000";
+const apiPort = process.env.ZUI_API_PORT ?? process.env.ZUI_PORT ?? "3000";
 const tsconfig = fileURLToPath(new URL("./tsconfig.web.json", import.meta.url));
 
 export default defineConfig({

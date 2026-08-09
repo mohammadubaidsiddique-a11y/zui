@@ -284,6 +284,11 @@ export function ReceivePage({ share }: { share: string }): JSX.Element {
               {stage === "verifying" && "verifying SHA-256 of the full file…"}
               {stage === "done" && "verified"}
             </span>
+            {stage === "waiting" && (
+              <span className="progress-label waiting-note">
+                0% is normal here — nothing has arrived yet. This tab retries by itself, so you can leave it open.
+              </span>
+            )}
           </div>
 
           {stage === "done" && (
