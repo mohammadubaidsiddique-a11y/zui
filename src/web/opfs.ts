@@ -112,13 +112,21 @@ export async function createOpfsOutFile(prefix: string): Promise<OpfsOutFile> {
 
 /** Streams the finished OPFS file to the user's download; cleans up after. */
 export async function downloadOpfsFile(out: OpfsOutFile, fileName: string): Promise<void> {
-  await out.writable.close();
+  try {
+    await out.writable.close();
+  } catch {
+    /* already closed */
+  }
   const f = await out.handle.getFile();
   const url = URL.createObjectURL(f);
   const a = document.createElement("a");
   a.href = url;
   a.download = fileName;
+  a.rel = "noopener";
+  a.style.display = "none";
+  document.body.appendChild(a);
   a.click();
+  a.remove();
   setTimeout(() => {
     URL.revokeObjectURL(url);
     navigator.storage.getDirectory().then((root) => root.removeEntry(out.name).catch(() => undefined));

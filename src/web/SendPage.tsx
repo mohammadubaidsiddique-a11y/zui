@@ -42,13 +42,33 @@ function triggerDownload(name: string, url: string): void {
   const a = document.createElement("a");
   a.href = url;
   a.download = name;
+  a.rel = "noopener";
+  a.style.display = "none";
+  document.body.appendChild(a);
   a.click();
+  a.remove();
 }
 
-function downloadBlob(name: string, blobParts: BlobPart[], type: string): void {
-  const url = URL.createObjectURL(new Blob(blobParts, { type }));
+type SaveHandle = { createWritable(): Promise<FileSystemWritableFileStream> };
+
+async function downloadBlob(name: string, blobParts: BlobPart[], type: string): Promise<void> {
+  const blob = new Blob(blobParts, { type });
+  const pick = (window as { showSaveFilePicker?: (opts?: unknown) => Promise<SaveHandle> }).showSaveFilePicker;
+  if (typeof pick === "function") {
+    try {
+      const handle = await pick({ suggestedName: name });
+      const writable = await handle.createWritable();
+      await writable.write(blob);
+      await writable.close();
+      return;
+    } catch (err) {
+      if ((err as Error).name === "AbortError") return;
+      // picker unavailable or failed — fall back to an anchor download
+    }
+  }
+  const url = URL.createObjectURL(blob);
   triggerDownload(name, url);
-  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
 interface WrapResult {
@@ -152,8 +172,9 @@ export function SendPage(): JSX.Element {
       setWrapState("done");
 
       if (opfsOut) {
-        // Instant download: streams from disk, no memory spike.
-        await downloadOpfsFile(opfsOut, containerName);
+        // Instant download: streams from disk, no memory spike. Failure must
+        // never flip the done state to error — the button stays as a fallback.
+        void downloadOpfsFile(opfsOut, containerName).catch(() => undefined);
       }
     } catch (err) {
       setWrapState("error");
@@ -338,7 +359,7 @@ export function SendPage(): JSX.Element {
             <p className="wrap-line">Original file restored with its type — download it:</p>
             <button
               className="btn-download"
-              onClick={() => downloadBlob(convResult.fileName, convResult.parts as unknown as BlobPart[], "application/octet-stream")}
+              onClick={() => void downloadBlob(convResult.fileName, convResult.parts as unknown as BlobPart[], "application/octet-stream")}
             >
               Download {convResult.fileName}
             </button>
