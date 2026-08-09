@@ -16,7 +16,9 @@ import {
   verifyZui,
   createSha256,
   nodeStreamToSource,
+  decompressChunk,
 } from "@codec/index";
+import { concatParts } from "@codec/streams";
 import { ZUI_DEFAULT_CHUNK_SIZE } from "@shared/format";
 import type { CompressionMode } from "@codec/compress";
 import {
@@ -313,7 +315,16 @@ export function createTransferService(storage: ZuiStorage, config: ZuiServerConf
         return (async function* () {
           for (let i = 0; i < session.meta.chunkCount; i += 1) {
             const obj = await storage.get(CHUNK_KEY(id, i));
-            for await (const chunk of nodeStreamToSource(obj.stream)) yield chunk;
+            if (session.meta.compression === "deflate-raw") {
+              // Chunks travelled compressed: restore the original bytes so the
+              // package container is a truthful .zui of the sender's file
+              // (no double compression, orig SHA-256 stays correct).
+              const storedParts: Uint8Array[] = [];
+              for await (const chunk of nodeStreamToSource(obj.stream)) storedParts.push(chunk);
+              yield await decompressChunk("deflate-raw", concatParts(storedParts));
+            } else {
+              for await (const chunk of nodeStreamToSource(obj.stream)) yield chunk;
+            }
           }
         })();
       };

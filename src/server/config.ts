@@ -58,8 +58,8 @@ export function loadConfig(overrides: Partial<ZuiServerConfig> = {}): ZuiServerC
     sweepIntervalMs: intEnv("ZUI_SWEEP_INTERVAL_MS", 10 * 60 * 1000),
     accessToken: process.env.ZUI_ACCESS_TOKEN?.trim() || undefined,
     rateLimits: {
-      general: intEnv("ZUI_RATE_LIMIT_GENERAL", 300),
-      chunks: intEnv("ZUI_RATE_LIMIT_CHUNKS", 1200),
+      general: intEnv("ZUI_RATE_LIMIT_GENERAL", 5000),
+      chunks: intEnv("ZUI_RATE_LIMIT_CHUNKS", 6000),
       sessions: intEnv("ZUI_RATE_LIMIT_SESSIONS", 40),
     },
     s3: {

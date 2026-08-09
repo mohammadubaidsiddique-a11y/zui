@@ -15,3 +15,9 @@ services:
         value: dist/web
       - key: ZUI_MAX_SESSION_BYTES
         value: "17179869184"
+      - key: ZUI_RATE_LIMIT_GENERAL
+        value: "5000"
+      - key: ZUI_RATE_LIMIT_CHUNKS
+        value: "6000"
+      - key: ZUI_MAX_CHUNK_BYTES
+        value: "67108864"

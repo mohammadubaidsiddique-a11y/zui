@@ -168,6 +168,10 @@ footer.footer {
 
 .row { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
 
+.compress-opt { display: flex; align-items: center; gap: 8px; margin: 10px 0 0; font-size: 13px; color: var(--muted); cursor: pointer; }
+.compress-opt input { accent-color: #000000; cursor: pointer; }
+.compress-opt:disabled { opacity: 0.5; cursor: not-allowed; }
+
 .table-scroll { overflow: auto; max-height: 320px; border: 1px solid var(--border); border-radius: 8px; }
 table.chunks { border-collapse: collapse; width: 100%; font-size: 13px; }
 .chunks th, .chunks td { padding: 6px 10px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }

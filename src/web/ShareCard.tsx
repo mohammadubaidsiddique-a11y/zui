@@ -1,5 +1,5 @@
 import { useCallback, useRef, useState, type JSX } from "react";
-import { createSha256 } from "@codec/index";
+import { compressionSupported, compressChunk, createSha256 } from "@codec/index";
 
 const fmt = (n: number): string => {
   if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(2)} GiB`;
@@ -28,7 +28,10 @@ export function ShareCard(): JSX.Element {
   const [link, setLink] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [compress, setCompress] = useState(true);
+  const compressionSupportedHere = compressionSupported("deflate-raw");
   const abortRef = useRef(false);
+  const wireRef = useRef<"none" | "deflate-raw">("none");
 
   const streamHash = useCallback(async (f: File, onProgress: (frac: number) => void): Promise<string> => {
     const hasher = createSha256();
@@ -50,7 +53,7 @@ export function ShareCard(): JSX.Element {
     return hasher.digestHex();
   }, []);
 
-  const uploadAll = useCallback(async (f: File, s: SessionInfo, onEach: (done: number, total: number) => void) => {
+  const uploadAll = useCallback(async (f: File, s: SessionInfo, wire: "none" | "deflate-raw", onEach: (done: number, total: number) => void) => {
     const getStored = async (): Promise<Set<number>> => {
       const r = await fetch(`/api/v1/sessions/${s.id}?role=sender`, {
         headers: { Authorization: `Bearer ${s.senderToken}` },
@@ -69,7 +72,10 @@ export function ShareCard(): JSX.Element {
       }
       const slice = await f.slice(i * s.chunkSize, Math.min((i + 1) * s.chunkSize, f.size)).arrayBuffer();
       const bytes = new Uint8Array(slice);
-      const sha = (await createSha256().update(bytes).digestHex());
+      // Stage 1 — compress: the file's bytes are deflated here, so the
+      // (smaller) compressed form is what travels over the wire.
+      const wireBytes = wire === "deflate-raw" ? await compressChunk(wire, bytes) : bytes;
+      const sha = (await createSha256().update(wireBytes).digestHex());
       const r = await fetch(`/api/v1/sessions/${s.id}/chunks/${i}`, {
         method: "PUT",
         headers: {
@@ -77,13 +83,15 @@ export function ShareCard(): JSX.Element {
           "Content-Type": "application/octet-stream",
           "X-Chunk-Sha256": sha,
         },
-        body: bytes,
+        body: wireBytes as unknown as Uint8Array<ArrayBuffer>,
       });
       if (r.status === 401 || r.status === 410 || r.status === 409) {
         throw new Error(`upload rejected (${r.status}) — session may have expired`);
       }
       if (!r.ok && r.status !== 200) throw new Error(`chunk ${i} upload failed (${r.status})`);
-      if (r.status === 200) stored = await getStored();
+      // A 200 (resume) or 201 (fresh) both mean the chunk is on the server —
+      // track it locally instead of polling the session after every chunk.
+      stored.add(i);
       onEach(i + 1, s.chunkCount);
     }
   }, []);
@@ -99,10 +107,18 @@ export function ShareCard(): JSX.Element {
     setLink("");
     try {
       const sha256 = await streamHash(f, (p) => setProgress(p));
+      const wire: "none" | "deflate-raw" = compress && compressionSupportedHere ? "deflate-raw" : "none";
+      wireRef.current = wire;
       const r = await fetch("/api/v1/sessions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fileName: f.name, size: f.size, sha256, mimeType: f.type || "application/octet-stream" }),
+        body: JSON.stringify({
+          fileName: f.name,
+          size: f.size,
+          sha256,
+          mimeType: f.type || "application/octet-stream",
+          compression: wire,
+        }),
       });
       if (!r.ok) throw new Error("could not create transfer");
       const j = (await r.json()) as { session: SessionInfo };
@@ -110,7 +126,7 @@ export function ShareCard(): JSX.Element {
       setSession(s);
       setPhase("uploading");
       setUploaded(0);
-      await uploadAll(f, s, (done, total) => {
+      await uploadAll(f, s, wire, (done, total) => {
         setUploaded(done);
         setProgress(done / total);
       });
@@ -135,7 +151,7 @@ export function ShareCard(): JSX.Element {
     abortRef.current = false;
     void (async () => {
       try {
-        await uploadAll(file, session, (done, total) => {
+        await uploadAll(file, session, wireRef.current, (done, total) => {
           setUploaded(done);
           setProgress(done / total);
         });
@@ -194,6 +210,18 @@ export function ShareCard(): JSX.Element {
         )}
       </div>
 
+      {phase === "idle" && (
+        <label className="compress-opt">
+          <input
+            type="checkbox"
+            checked={compress}
+            disabled={!compressionSupportedHere}
+            onChange={(e) => setCompress(e.target.checked)}
+          />
+          Compress before uploading — bytes travel smaller, the receiver restores the original
+        </label>
+      )}
+
       {phase === "hashing" && (
         <div className="progress-wrap">
           <div className="progress-bar"><div className="progress-fill" style={{ width: `${Math.round(progress * 100)}%` }} /></div>
@@ -205,7 +233,9 @@ export function ShareCard(): JSX.Element {
         <div className="progress-wrap">
           <div className="progress-bar"><div className="progress-fill" style={{ width: `${Math.round(progress * 100)}%` }} /></div>
           <span className="progress-label">
-            uploading chunk {uploaded}/{session?.chunkCount} — every chunk is SHA-256 verified on the server
+            {wireRef.current === "deflate-raw"
+              ? `compressing chunk ${uploaded}/${session?.chunkCount}, then uploading — verified at both ends`
+              : `uploading chunk ${uploaded}/${session?.chunkCount} — every chunk is SHA-256 verified on the server`}
           </span>
           <div className="row">
             <button className="btn-outline" onClick={() => { abortRef.current = true; }}>pause</button>

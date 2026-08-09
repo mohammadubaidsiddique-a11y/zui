@@ -83,7 +83,6 @@ export function createApp(ctx: ZuiAppContext): express.Express {
   };
 
   const api = express.Router();
-  api.use(limits.general);
   api.use(express.json({ limit: "1mb" }));
 
   api.get("/health", (_req, res) => {
@@ -99,7 +98,7 @@ export function createApp(ctx: ZuiAppContext): express.Express {
     }
   });
 
-  api.get("/sessions/:id", requireToken, async (req, res, next) => {
+  api.get("/sessions/:id", limits.general, requireToken, async (req, res, next) => {
     try {
       const id = req.params.id as string;
       const role = req.query.role === "sender" ? "sender" : "receiver";
@@ -142,7 +141,7 @@ export function createApp(ctx: ZuiAppContext): express.Express {
     }
   });
 
-  api.get("/sessions/:id/chunks/:index", requireToken, async (req, res, next) => {
+  api.get("/sessions/:id/chunks/:index", limits.chunks, requireToken, async (req, res, next) => {
     try {
       const id = req.params.id as string;
       const index = validateChunkIndex(req.params.index as string);
@@ -158,7 +157,7 @@ export function createApp(ctx: ZuiAppContext): express.Express {
     }
   });
 
-  api.post("/sessions/:id/verify", requireToken, async (req, res, next) => {
+  api.post("/sessions/:id/verify", limits.general, requireToken, async (req, res, next) => {
     try {
       const id = req.params.id as string;
       const token = (req as Request & { zuiToken: string }).zuiToken;
@@ -169,7 +168,7 @@ export function createApp(ctx: ZuiAppContext): express.Express {
     }
   });
 
-  api.post("/sessions/:id/finalize", requireToken, async (req, res, next) => {
+  api.post("/sessions/:id/finalize", limits.general, requireToken, async (req, res, next) => {
     try {
       const id = req.params.id as string;
       const token = (req as Request & { zuiToken: string }).zuiToken;
@@ -180,7 +179,7 @@ export function createApp(ctx: ZuiAppContext): express.Express {
     }
   });
 
-  api.get("/sessions/:id/package", requireToken, async (req, res, next) => {
+  api.get("/sessions/:id/package", limits.general, requireToken, async (req, res, next) => {
     try {
       const id = req.params.id as string;
       const token = (req as Request & { zuiToken: string }).zuiToken;
@@ -209,7 +208,7 @@ export function createApp(ctx: ZuiAppContext): express.Express {
     }
   });
 
-  api.post("/sessions/:id/cancel", requireToken, async (req, res, next) => {
+  api.post("/sessions/:id/cancel", limits.general, requireToken, async (req, res, next) => {
     try {
       const id = req.params.id as string;
       const token = (req as Request & { zuiToken: string }).zuiToken;
@@ -220,7 +219,7 @@ export function createApp(ctx: ZuiAppContext): express.Express {
     }
   });
 
-  api.delete("/sessions/:id", requireToken, async (req, res, next) => {
+  api.delete("/sessions/:id", limits.general, requireToken, async (req, res, next) => {
     try {
       const id = req.params.id as string;
       const token = (req as Request & { zuiToken: string }).zuiToken;

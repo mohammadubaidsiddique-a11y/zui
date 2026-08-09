@@ -10,7 +10,7 @@ import { createTransferService, type TransferService } from "@server/transfers";
 import { createApp } from "@server/app";
 import type { Server } from "node:http";
 import { createHash, randomBytes } from "node:crypto";
-import { ZuiDecoder, webStreamToSource } from "@codec/index";
+import { ZuiDecoder, webStreamToSource, compressChunk, decompressChunk } from "@codec/index";
 import { concatParts } from "@codec/streams";
 
 interface TestServer {
@@ -187,6 +187,80 @@ describe("ZUI REST API", () => {
     expect(chunkRes.status).toBe(200);
     expect(chunkRes.headers.get("x-chunk-sha256")).toBe(sha(chunks[2]!));
     expect(new Uint8Array(await chunkRes.arrayBuffer())).toEqual(chunks[2]);
+  });
+
+  it("compressed transfer: chunks travel deflate-compressed, receiver restores the original", async () => {
+    const srv = await startServer();
+    const chunkSize = 2 * 1024 * 1024;
+    const unit = new TextEncoder().encode("compressible zui transfer payload line\n");
+    const rawChunks: Uint8Array[] = [];
+    for (let i = 0; i < 3; i += 1) {
+      const n = unit.byteLength * (40_000 + i * 5_000);
+      const c = new Uint8Array(n);
+      for (let at = 0; at < n; at += unit.byteLength) c.set(unit, at);
+      rawChunks.push(c);
+    }
+    const size = rawChunks.reduce((s, c) => s + c.byteLength, 0);
+    const origSha = sha(concatParts(rawChunks));
+
+    const created = await createSession(srv, {
+      fileName: "log.txt",
+      mimeType: "text/plain",
+      size,
+      sha256: origSha,
+      chunkSize,
+      compression: "deflate-raw",
+    });
+    const { id, senderToken, receiverToken } = created.session;
+    expect(created.session.chunkCount).toBe(3);
+
+    // Compress first, then travel: every wire chunk is the deflated slice.
+    const storedChunks: Uint8Array[] = [];
+    for (let i = 0; i < rawChunks.length; i += 1) {
+      const stored = await compressChunk("deflate-raw", rawChunks[i]!);
+      storedChunks.push(stored);
+      const res = await fetch(`${srv.base}/api/v1/sessions/${id}/chunks/${i}`, {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${senderToken}`,
+          "X-Chunk-Sha256": sha(stored),
+          "Content-Length": String(stored.byteLength),
+        },
+        body: stored,
+      });
+      expect(res.status).toBe(201);
+    }
+    // Real compression along the wire: stored < raw on every chunk.
+    expect(storedChunks.every((s, i) => s.byteLength < rawChunks[i]!.byteLength)).toBe(true);
+
+    const fin = await fetch(`${srv.base}/api/v1/sessions/${id}/finalize`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${senderToken}` },
+    });
+    expect(fin.status).toBe(200);
+
+    // Download one chunk as the receiver — bytes are compressed, and the
+    // client inflates them back into the original slice.
+    const chunkRes = await fetch(`${srv.base}/api/v1/sessions/${id}/chunks/1`, {
+      headers: { Authorization: `Bearer ${receiverToken}` },
+    });
+    expect(chunkRes.status).toBe(200);
+    expect(chunkRes.headers.get("x-chunk-sha256")).toBe(sha(storedChunks[1]!));
+    const restoredSlice = await decompressChunk("deflate-raw", new Uint8Array(await chunkRes.arrayBuffer()));
+    expect(Buffer.from(restoredSlice).equals(Buffer.from(rawChunks[1]!))).toBe(true);
+
+    // The finalize package is a truthful container of the ORIGINAL file.
+    const pkgRes = await fetch(`${srv.base}/api/v1/sessions/${id}/package`, {
+      headers: { Authorization: `Bearer ${receiverToken}` },
+    });
+    expect(pkgRes.status).toBe(200);
+    const decoder = await ZuiDecoder.open(webStreamToSource(pkgRes.body!));
+    expect(decoder.header.origSize).toBe(size);
+    const rebuilt: Uint8Array[] = [];
+    for await (const chunk of decoder.reconstruct()) rebuilt.push(chunk);
+    const whole = concatParts(rebuilt);
+    expect(whole.byteLength).toBe(size);
+    expect(sha(whole)).toBe(origSha);
   });
 
   it("rejects invalid session metadata", async () => {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type JSX } from "react";
-import { createSha256 } from "@codec/index";
+import { createSha256, decompressChunk, rawSizeAt } from "@codec/index";
 import { openRecvSink, type ChunkSink } from "./recvStore";
 
 interface SessionMeta {
@@ -12,6 +12,7 @@ interface SessionMeta {
   sha256: string;
   chunkSize: number;
   chunkCount: number;
+  compression: string;
 }
 
 interface ChunkInfo {
@@ -79,7 +80,7 @@ export function ReceivePage({ share }: { share: string }): JSX.Element {
   }, [api, id]);
 
   const downloadChunk = useCallback(
-    async (index: number): Promise<Uint8Array | null> => {
+    async (index: number, meta: SessionMeta): Promise<Uint8Array | null> => {
       try {
         const r = await api(`/sessions/${id}/chunks/${index}?role=receiver`);
         if (!r.ok) return null;
@@ -91,7 +92,15 @@ export function ReceivePage({ share }: { share: string }): JSX.Element {
           throw new Error(`chunk ${index} failed its SHA-256 check`);
         }
         console.debug(`[zui-hash] ok ${index}`);
-        return buf;
+        if (meta.compression !== "deflate-raw") return buf;
+        // Stage 3 — enhance: bytes that travelled compressed get restored to
+        // the exact original slice before being written to the file.
+        const raw = await decompressChunk("deflate-raw", buf);
+        const expected = rawSizeAt(meta.size, meta.chunkSize, index, meta.chunkCount);
+        if (raw.byteLength !== expected) {
+          throw new Error(`chunk ${index} decompressed to ${raw.byteLength} bytes, expected ${expected}`);
+        }
+        return raw;
       } catch {
         return null;
       }
@@ -173,7 +182,7 @@ export function ReceivePage({ share }: { share: string }): JSX.Element {
           if (cancelled) return;
           const completed = await sink.completedChunks();
           if (ci.index < completed) continue;
-          const buf = await downloadChunk(ci.index);
+          const buf = await downloadChunk(ci.index, m);
           if (!buf) continue;
           await sink.writeChunk(ci.index, buf);
           setComplete(completed + 1);
@@ -252,6 +261,7 @@ export function ReceivePage({ share }: { share: string }): JSX.Element {
             <dt>Size</dt><dd>{fmt(meta.size)}</dd>
             <dt>Type</dt><dd>{meta.mimeType || "binary"}</dd>
             <dt>Chunks</dt><dd>{meta.chunkCount} × {fmt(meta.chunkSize)}</dd>
+            <dt>Travel</dt><dd>{meta.compression === "deflate-raw" ? "compressed (deflate-raw), restored here" : "raw bytes"}</dd>
             <dt>SHA-256</dt><dd className="mono">{meta.sha256}</dd>
             <dt>Expires</dt><dd>{new Date(meta.expiresAt).toLocaleString()}</dd>
             <dt>Storage</dt><dd className="backend-line">{backend ? `disk-backed (${backend})` : "detecting…"}</dd>
@@ -269,7 +279,8 @@ export function ReceivePage({ share }: { share: string }): JSX.Element {
             </div>
             <span className="progress-label">
               {stage === "waiting" && `${peerStatus || "waiting for the sender…"}`}
-              {stage === "downloading" && `downloading & verifying chunks — ${complete}/${chunkCount}`}
+              {stage === "downloading" &&
+                `${meta.compression === "deflate-raw" ? "downloading & decompressing (enhancing) chunks" : "downloading & verifying chunks"} — ${complete}/${chunkCount}`}
               {stage === "verifying" && "verifying SHA-256 of the full file…"}
               {stage === "done" && "verified"}
             </span>
