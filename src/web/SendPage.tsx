@@ -2,8 +2,15 @@
 import { useCallback, useRef, useState, type JSX } from "react";
 import { encodeZui, verifyZui, ZuiDecoder, probeCompressible, type ByteSink, type ByteSource } from "@codec/index";
 import { ShareCard } from "./ShareCard";
-import { createOpfsOutFile, downloadOpfsFile, opfsAvailable, readOpfsBytes, type OpfsOutFile } from "./opfs";
-import { downloadBlob, type DownloadReport } from "./download";
+import {
+  cleanupStaleWrapFiles,
+  createOpfsOutFile,
+  finalizedOpfsUrl,
+  opfsAvailable,
+  readOpfsBytes,
+  type OpfsOutFile,
+} from "./opfs";
+import { downloadBlob, triggerDownload, type DownloadReport } from "./download";
 
 const formatBytes = (n: number): string => {
   if (n < 1024) return `${n} B`;
@@ -46,6 +53,7 @@ interface WrapResult {
   containerSize: number;
   parts?: Uint8Array[];
   opfs?: OpfsOutFile;
+  url?: string;
 }
 
 interface UnwrapResult {
@@ -55,6 +63,10 @@ interface UnwrapResult {
 }
 
 type JobState = "idle" | "busy" | "done" | "error";
+
+// OPFS containers above this size use the disk-streamed URL fast lane on
+// download; smaller ones go through the reliable ladder (picker/server).
+const FAST_DOWNLOAD_MAX = 512 * 1024 * 1024;
 
 export function SendPage(): JSX.Element {
   const [wrapResult, setWrapResult] = useState<WrapResult | null>(null);
@@ -73,6 +85,7 @@ export function SendPage(): JSX.Element {
   const [dragOver, setDragOver] = useState<"wrap" | "conv" | null>(null);
   const busy = useRef(false);
   const wrapFileRef = useRef<File | null>(null);
+  const wrapUrlRef = useRef<string | null>(null);
 
   const reportDownload = (r: DownloadReport): void => {
     setDlReport(r);
@@ -90,6 +103,15 @@ export function SendPage(): JSX.Element {
     setWrapResult(null);
     setWrapError(undefined);
     try {
+      // A new wrap replaces the old one: drop its object URL and purge the
+      // OPFS file it referenced (they must never be deleted on a timer while
+      // the UI still offers the Download button).
+      if (wrapUrlRef.current) {
+        URL.revokeObjectURL(wrapUrlRef.current);
+        wrapUrlRef.current = null;
+      }
+      void cleanupStaleWrapFiles(null);
+
       // Instant path: already-compressed media (video/audio/archives) is
       // entropy-probed and packaged WITHOUT deflate — no CPU burn on 2GB.
       const probeSample = new Uint8Array(await f.slice(0, Math.min(f.size, 512 * 1024)).arrayBuffer());
@@ -141,14 +163,18 @@ export function SendPage(): JSX.Element {
         containerSize: total,
         ...(opfsOut ? { opfs: opfsOut } : { parts: memoryParts }),
       };
+      if (opfsOut) {
+        // Keep a stable URL for the finished container; the file stays in
+        // OPFS until the NEXT wrap cleans it up, so this button can never
+        // point at a deleted file (Chrome would throw NotReadableError).
+        result.url = await finalizedOpfsUrl(opfsOut);
+        wrapUrlRef.current = result.url;
+        if (result.containerSize <= FAST_DOWNLOAD_MAX) {
+          void triggerDownload(containerName, result.url);
+        }
+      }
       setWrapResult(result);
       setWrapState("done");
-
-      if (opfsOut) {
-        // Instant download: streams from disk, no memory spike. Failure must
-        // never flip the done state to error — the button stays as a fallback.
-        void downloadOpfsFile(opfsOut, containerName).catch(() => undefined);
-      }
     } catch (err) {
       setWrapState("error");
       setWrapError((err as Error).message);
@@ -163,6 +189,11 @@ export function SendPage(): JSX.Element {
     // Reliable ladder: native picker → server-mediated → anchor. Never a
     // silent no-op or a zero-byte file.
     if (r.opfs) {
+      if (r.containerSize > FAST_DOWNLOAD_MAX && r.url) {
+        // Gigabyte-scale: stream from disk, no memory spike.
+        triggerDownload(r.containerName, r.url);
+        return;
+      }
       void readOpfsBytes(r.opfs)
         .then((buf) => downloadBlob(r.containerName, [buf as unknown as BlobPart], "application/octet-stream"))
         .then(reportDownload)

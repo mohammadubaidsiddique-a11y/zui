@@ -122,7 +122,41 @@ export async function readOpfsBytes(out: OpfsOutFile): Promise<Uint8Array> {
   return new Uint8Array(await f.arrayBuffer());
 }
 
-/** Streams the finished OPFS file to the user's download; cleans up after. */
+/**
+ * Deletes previously wrapped OPFS files that are no longer referenced by the
+ * UI. Called when a new wrap starts — old files must not be removed on a
+ * timer, because the Download button keeps referencing them (removing one
+ * makes Chrome throw NotReadableError: "The requested file could not be read,
+ * typically due to permission problems…").
+ */
+export async function cleanupStaleWrapFiles(exceptName: string | null): Promise<void> {
+  try {
+    const root = await navigator.storage.getDirectory();
+    const values = (root as FileSystemDirectoryHandle & {
+      values(): AsyncIterableIterator<FileSystemFileHandle>;
+    }).values();
+    for await (const handle of values) {
+      if (handle.kind === "file" && /^zui-wrap-.*\.zui$/.test(handle.name) && handle.name !== exceptName) {
+        await root.removeEntry(handle.name).catch(() => undefined);
+      }
+    }
+  } catch {
+    /* OPFS unavailable */
+  }
+}
+
+/** Closes the output writable and returns a stable URL for the container. */
+export async function finalizedOpfsUrl(out: OpfsOutFile): Promise<string> {
+  try {
+    await out.writable.close();
+  } catch {
+    /* already closed */
+  }
+  const f = await out.handle.getFile();
+  return URL.createObjectURL(f);
+}
+
+/** Fast disk-streamed download lane; always also have the ladder available. */
 export async function downloadOpfsFile(out: OpfsOutFile, fileName: string): Promise<void> {
   try {
     await out.writable.close();
@@ -132,8 +166,4 @@ export async function downloadOpfsFile(out: OpfsOutFile, fileName: string): Prom
   const f = await out.handle.getFile();
   const url = URL.createObjectURL(f);
   triggerDownload(fileName, url);
-  setTimeout(() => {
-    URL.revokeObjectURL(url);
-    navigator.storage.getDirectory().then((root) => root.removeEntry(out.name).catch(() => undefined));
-  }, 120_000);
 }
