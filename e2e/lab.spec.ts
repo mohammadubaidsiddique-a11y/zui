@@ -35,4 +35,10 @@ test("Codec Lab: encodes, inspects, verifies and reconstructs a real file in the
 
   // Reconstructed download is offered once integrity holds.
   await expect(page.getByRole("button", { name: "Download reconstructed original" })).toBeVisible();
+
+  // Clicking it must actually produce a browser download of the original file.
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download reconstructed original" }).click();
+  const download = await downloadPromise;
+  expect(download.suggestedFilename()).toBe("roundtrip.bin");
 });

@@ -1,5 +1,6 @@
 import { registerFilePayloadStore, type PayloadStore } from "@codec/payload";
 import type { ByteSource } from "@codec/streams";
+import { triggerDownload } from "./download";
 
 /* global FileSystemFileHandle, BufferSource */
 
@@ -119,14 +120,7 @@ export async function downloadOpfsFile(out: OpfsOutFile, fileName: string): Prom
   }
   const f = await out.handle.getFile();
   const url = URL.createObjectURL(f);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = fileName;
-  a.rel = "noopener";
-  a.style.display = "none";
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
+  triggerDownload(fileName, url);
   setTimeout(() => {
     URL.revokeObjectURL(url);
     navigator.storage.getDirectory().then((root) => root.removeEntry(out.name).catch(() => undefined));

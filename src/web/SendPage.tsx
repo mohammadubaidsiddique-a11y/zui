@@ -3,6 +3,7 @@ import { useCallback, useRef, useState, type JSX } from "react";
 import { encodeZui, verifyZui, ZuiDecoder, probeCompressible, type ByteSink, type ByteSource } from "@codec/index";
 import { ShareCard } from "./ShareCard";
 import { createOpfsOutFile, downloadOpfsFile, opfsAvailable, type OpfsOutFile } from "./opfs";
+import { downloadBlob, triggerDownload } from "./download";
 
 const formatBytes = (n: number): string => {
   if (n < 1024) return `${n} B`;
@@ -37,39 +38,6 @@ const fileSource = (file: File, onProgress?: (frac: number) => void): ByteSource
     },
   };
 };
-
-function triggerDownload(name: string, url: string): void {
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = name;
-  a.rel = "noopener";
-  a.style.display = "none";
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-}
-
-type SaveHandle = { createWritable(): Promise<FileSystemWritableFileStream> };
-
-async function downloadBlob(name: string, blobParts: BlobPart[], type: string): Promise<void> {
-  const blob = new Blob(blobParts, { type });
-  const pick = (window as { showSaveFilePicker?: (opts?: unknown) => Promise<SaveHandle> }).showSaveFilePicker;
-  if (typeof pick === "function") {
-    try {
-      const handle = await pick({ suggestedName: name });
-      const writable = await handle.createWritable();
-      await writable.write(blob);
-      await writable.close();
-      return;
-    } catch (err) {
-      if ((err as Error).name === "AbortError") return;
-      // picker unavailable or failed — fall back to an anchor download
-    }
-  }
-  const url = URL.createObjectURL(blob);
-  triggerDownload(name, url);
-  setTimeout(() => URL.revokeObjectURL(url), 60_000);
-}
 
 interface WrapResult {
   originalName: string;

@@ -12,6 +12,7 @@ import { ValidationError, validateChunkIndex, validateTokenFormat } from "@serve
 import { hashedTokensEqual, hashToken } from "@server/crypto";
 import { createRateLimiters } from "@server/rate-limit";
 import { listChunkStates } from "@server/sessions";
+import { createTempDownloadStore } from "@server/local-download";
 import type { Logger } from "@server/logger";
 import { httpLogger } from "@server/logger";
 
@@ -66,6 +67,7 @@ export function createApp(ctx: ZuiAppContext): express.Express {
   });
 
   const limits = createRateLimiters(config.rateLimits);
+  const tempDownloads = createTempDownloadStore(config.dataDir);
 
   const globalAccessToken = config.accessToken;
   const guardMutation = (req: Request, res: Response, next: NextFunction): void => {
@@ -231,6 +233,38 @@ export function createApp(ctx: ZuiAppContext): express.Express {
   });
 
   app.use("/api/v1", api);
+
+  // Local browser-side downloads that can't be Blob URLs (Safari limits,
+  // embedded contexts): stage the bytes server-side, then the client issues a
+  // plain same-origin GET that browsers download natively. Temp files are
+  // deleted after being served and TTL-swept regardless.
+  api.post("/local-download", limits.general, async (req, res, next) => {
+    try {
+      if (req.headers["content-type"] && !/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+(?:\s*;\s*charset=[\w-]+)?$/i.test(req.headers["content-type"])) {
+        throw new ApiError("invalid content type", 400, "bad_request");
+      }
+      let rawName = "";
+      try {
+        rawName = typeof req.headers["x-zui-filename"] === "string" ? decodeURIComponent(req.headers["x-zui-filename"]) : "";
+      } catch {
+        rawName = "";
+      }
+      if (rawName.length > 512) throw new ApiError("file name too long", 400, "bad_request");
+      const mime = (req.headers["content-type"] ?? "application/octet-stream").split(";")[0].trim();
+      const { id } = await tempDownloads.save(req, rawName, mime, config.maxSessionBytes);
+      res.status(201).json({ url: `/api/v1/local-download/${id}` });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  api.get("/local-download/:id", limits.general, async (req, res, next) => {
+    try {
+      await tempDownloads.serve(req.params.id as string, res);
+    } catch (err) {
+      next(err);
+    }
+  });
   app.get("/health", (_req, res) => {
     res.json({ ok: true, service: "zui", storage: storage.kind, time: new Date().toISOString() });
   });

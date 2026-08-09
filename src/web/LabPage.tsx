@@ -9,6 +9,7 @@ import {
   type ZuiEncodeResult,
   type ZuiVerifyResult,
 } from "@codec/index";
+import { downloadBlob } from "./download";
 
 interface LabState {
   phase: "idle" | "encoding" | "done" | "error";
@@ -190,13 +191,7 @@ export function LabPage(): JSX.Element {
 
   const download = useCallback((name: string, partsOf: Uint8Array[] | null) => {
     if (!partsOf || partsOf.length === 0) return;
-    const blob = new Blob(partsOf as BlobPart[], { type: "application/octet-stream" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = name;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    void downloadBlob(name, partsOf as unknown as BlobPart[], "application/octet-stream");
   }, []);
 
   const meta = state.meta;
