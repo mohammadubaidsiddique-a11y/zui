@@ -2,8 +2,8 @@
 import { useCallback, useRef, useState, type JSX } from "react";
 import { encodeZui, verifyZui, ZuiDecoder, probeCompressible, type ByteSink, type ByteSource } from "@codec/index";
 import { ShareCard } from "./ShareCard";
-import { createOpfsOutFile, downloadOpfsFile, opfsAvailable, type OpfsOutFile } from "./opfs";
-import { downloadBlob, triggerDownload } from "./download";
+import { createOpfsOutFile, downloadOpfsFile, opfsAvailable, readOpfsBytes, type OpfsOutFile } from "./opfs";
+import { downloadBlob } from "./download";
 
 const formatBytes = (n: number): string => {
   if (n < 1024) return `${n} B`;
@@ -44,7 +44,7 @@ interface WrapResult {
   originalSize: number;
   containerName: string;
   containerSize: number;
-  url?: string;
+  parts?: Uint8Array[];
   opfs?: OpfsOutFile;
 }
 
@@ -131,11 +131,8 @@ export function SendPage(): JSX.Element {
         originalSize: f.size,
         containerName,
         containerSize: total,
-        ...(opfsOut ? { opfs: opfsOut } : {}),
+        ...(opfsOut ? { opfs: opfsOut } : { parts: memoryParts }),
       };
-      if (!opfsOut) {
-        result.url = URL.createObjectURL(new Blob(memoryParts as unknown as BlobPart[], { type: "application/octet-stream" }));
-      }
       setWrapResult(result);
       setWrapState("done");
 
@@ -155,8 +152,15 @@ export function SendPage(): JSX.Element {
   const redownload = useCallback(() => {
     const r = wrapResult;
     if (!r) return;
-    if (r.opfs) void downloadOpfsFile(r.opfs, r.containerName);
-    else if (r.url) triggerDownload(r.containerName, r.url);
+    // Reliable ladder: native picker → server-mediated → anchor. Never a
+    // silent no-op or a zero-byte file.
+    if (r.opfs) {
+      void readOpfsBytes(r.opfs).then((buf) =>
+        downloadBlob(r.containerName, [buf as unknown as BlobPart], "application/octet-stream")
+      );
+    } else if (r.parts) {
+      void downloadBlob(r.containerName, r.parts as unknown as BlobPart[], "application/octet-stream");
+    }
   }, [wrapResult]);
 
   const convert = useCallback(async (f: File | null) => {

@@ -111,6 +111,17 @@ export async function createOpfsOutFile(prefix: string): Promise<OpfsOutFile> {
   return { handle, writable, name };
 }
 
+/** Reads the finished OPFS file's bytes (for the reliable download ladder). */
+export async function readOpfsBytes(out: OpfsOutFile): Promise<Uint8Array> {
+  try {
+    await out.writable.close();
+  } catch {
+    /* already closed */
+  }
+  const f = await out.handle.getFile();
+  return new Uint8Array(await f.arrayBuffer());
+}
+
 /** Streams the finished OPFS file to the user's download; cleans up after. */
 export async function downloadOpfsFile(out: OpfsOutFile, fileName: string): Promise<void> {
   try {
