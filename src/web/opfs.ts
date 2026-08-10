@@ -1,6 +1,5 @@
 import { registerFilePayloadStore, type PayloadStore } from "@codec/payload";
 import type { ByteSource } from "@codec/streams";
-import { triggerDownload } from "./download";
 
 /* global FileSystemFileHandle, BufferSource */
 
@@ -111,13 +110,18 @@ export async function createOpfsOutFile(prefix: string): Promise<OpfsOutFile> {
   return { handle, writable, name };
 }
 
-/** Reads the finished OPFS file's bytes (for the reliable download ladder). */
-export async function readOpfsBytes(out: OpfsOutFile): Promise<Uint8Array> {
+/** Closes the output writable so the file is safe to read afterwards. */
+export async function closeOpfsOutFile(out: OpfsOutFile): Promise<void> {
   try {
     await out.writable.close();
   } catch {
     /* already closed */
   }
+}
+
+/** Reads the finished OPFS file's bytes (for the reliable download ladder). */
+export async function readOpfsBytes(out: OpfsOutFile): Promise<Uint8Array> {
+  await closeOpfsOutFile(out);
   const f = await out.handle.getFile();
   return new Uint8Array(await f.arrayBuffer());
 }
@@ -143,27 +147,4 @@ export async function cleanupStaleWrapFiles(exceptName: string | null): Promise<
   } catch {
     /* OPFS unavailable */
   }
-}
-
-/** Closes the output writable and returns a stable URL for the container. */
-export async function finalizedOpfsUrl(out: OpfsOutFile): Promise<string> {
-  try {
-    await out.writable.close();
-  } catch {
-    /* already closed */
-  }
-  const f = await out.handle.getFile();
-  return URL.createObjectURL(f);
-}
-
-/** Fast disk-streamed download lane; always also have the ladder available. */
-export async function downloadOpfsFile(out: OpfsOutFile, fileName: string): Promise<void> {
-  try {
-    await out.writable.close();
-  } catch {
-    /* already closed */
-  }
-  const f = await out.handle.getFile();
-  const url = URL.createObjectURL(f);
-  triggerDownload(fileName, url);
 }

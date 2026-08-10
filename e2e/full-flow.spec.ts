@@ -61,3 +61,11 @@ test("Send: 200 MiB round trip via chunked upload (server route), byte-exact", a
   await writeFile(fixturePath, fileBytes);
   await runRoundTrip(page, fixturePath, "video.mp4", sha256(Buffer.from(fileBytes)));
 });
+
+test("Send: 384 MiB round trip, byte-exact (chunked slices over the 16 MiB boundary set)", async ({ page }) => {
+  const dir = await mkdtemp(join(tmpdir(), "zui-e2e-huge-"));
+  const fixturePath = join(dir, "movie.mp4");
+  const fileBytes = makeFixture(384 * 1024 * 1024);
+  await writeFile(fixturePath, fileBytes);
+  await runRoundTrip(page, fixturePath, "movie.mp4", sha256(Buffer.from(fileBytes)));
+});

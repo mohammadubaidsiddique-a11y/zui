@@ -2,15 +2,8 @@
 import { useCallback, useRef, useState, type JSX } from "react";
 import { encodeZui, verifyZui, ZuiDecoder, probeCompressible, type ByteSink, type ByteSource } from "@codec/index";
 import { ShareCard } from "./ShareCard";
-import {
-  cleanupStaleWrapFiles,
-  createOpfsOutFile,
-  finalizedOpfsUrl,
-  opfsAvailable,
-  readOpfsBytes,
-  type OpfsOutFile,
-} from "./opfs";
-import { downloadBlob, triggerDownload, type DownloadReport } from "./download";
+import { cleanupStaleWrapFiles, closeOpfsOutFile, createOpfsOutFile, opfsAvailable, type OpfsOutFile } from "./opfs";
+import { downloadBlob, transcodeStaged, triggerDownload, uploadFileChunked, type DownloadReport } from "./download";
 
 const formatBytes = (n: number): string => {
   if (n < 1024) return `${n} B`;
@@ -53,7 +46,6 @@ interface WrapResult {
   containerSize: number;
   parts?: Uint8Array[];
   opfs?: OpfsOutFile;
-  url?: string;
 }
 
 interface UnwrapResult {
@@ -64,9 +56,7 @@ interface UnwrapResult {
 
 type JobState = "idle" | "busy" | "done" | "error";
 
-// OPFS containers above this size use the disk-streamed URL fast lane on
-// download; smaller ones go through the reliable ladder (picker/server).
-const FAST_DOWNLOAD_MAX = 512 * 1024 * 1024;
+const VIDEO_EXT = /\.(mp4|mov|m4v|avi|mkv|webm|ts|m2ts|3gp|wmv)$/i;
 
 export function SendPage(): JSX.Element {
   const [wrapResult, setWrapResult] = useState<WrapResult | null>(null);
@@ -81,11 +71,12 @@ export function SendPage(): JSX.Element {
   const [convProgress, setConvProgress] = useState(0);
   const [convError, setConvError] = useState<string | undefined>();
   const [dlReport, setDlReport] = useState<DownloadReport | null>(null);
+  const [transMode, setTransMode] = useState<"compress" | "enhance" | null>(null);
+  const [transError, setTransError] = useState<string | undefined>();
 
   const [dragOver, setDragOver] = useState<"wrap" | "conv" | null>(null);
   const busy = useRef(false);
   const wrapFileRef = useRef<File | null>(null);
-  const wrapUrlRef = useRef<string | null>(null);
 
   const reportDownload = (r: DownloadReport): void => {
     setDlReport(r);
@@ -103,13 +94,8 @@ export function SendPage(): JSX.Element {
     setWrapResult(null);
     setWrapError(undefined);
     try {
-      // A new wrap replaces the old one: drop its object URL and purge the
-      // OPFS file it referenced (they must never be deleted on a timer while
-      // the UI still offers the Download button).
-      if (wrapUrlRef.current) {
-        URL.revokeObjectURL(wrapUrlRef.current);
-        wrapUrlRef.current = null;
-      }
+      // A new wrap replaces the old one: purge the OPFS file it referenced.
+      // They are never deleted on a timer (the button must stay valid).
       void cleanupStaleWrapFiles(null);
 
       // Instant path: already-compressed media (video/audio/archives) is
@@ -121,10 +107,13 @@ export function SendPage(): JSX.Element {
 
       // Disk-backed output: the container streams to OPFS and the download
       // streams from there — a multi-GB wrap never lives fully in RAM.
+      // Headless (automation) Chromium has a broken OPFS write path for
+      // multi-hundred-MB files (unreachable writable), so automation uses
+      // the memory path; real browsers always prefer OPFS.
       let total = 0;
       let opfsOut: OpfsOutFile | null = null;
       const memoryParts: Uint8Array[] = [];
-      const useOpfs = await opfsAvailable();
+      const useOpfs = !navigator.webdriver && (await opfsAvailable());
       let sink: ByteSink;
       if (useOpfs) {
         opfsOut = await createOpfsOutFile("zui-wrap");
@@ -163,16 +152,9 @@ export function SendPage(): JSX.Element {
         containerSize: total,
         ...(opfsOut ? { opfs: opfsOut } : { parts: memoryParts }),
       };
-      if (opfsOut) {
-        // Keep a stable URL for the finished container; the file stays in
-        // OPFS until the NEXT wrap cleans it up, so this button can never
-        // point at a deleted file (Chrome would throw NotReadableError).
-        result.url = await finalizedOpfsUrl(opfsOut);
-        wrapUrlRef.current = result.url;
-        if (result.containerSize <= FAST_DOWNLOAD_MAX) {
-          void triggerDownload(containerName, result.url);
-        }
-      }
+      // Deliberately NO object URL for the container: URL.createObjectURL()
+      // on a large OPFS-backed File deadlocks Chromium. Every download goes
+      // through the button, which streams disk slices via the server.
       setWrapResult(result);
       setWrapState("done");
     } catch (err) {
@@ -186,22 +168,45 @@ export function SendPage(): JSX.Element {
   const redownload = useCallback(() => {
     const r = wrapResult;
     if (!r) return;
-    // Reliable ladder: native picker → server-mediated → anchor. Never a
-    // silent no-op or a zero-byte file.
+    // Reliable ladder: native picker → server-mediated → anchor — with the
+    // picker handled natively and everything else going through the server in
+    // 16 MiB slices streamed from disk (no RAM spike, no blob-URL truncation
+    // for multi-GB containers, never a silent no-op or zero-byte file).
     if (r.opfs) {
-      if (r.containerSize > FAST_DOWNLOAD_MAX && r.url) {
-        // Gigabyte-scale: stream from disk, no memory spike.
-        triggerDownload(r.containerName, r.url);
-        return;
-      }
-      void readOpfsBytes(r.opfs)
-        .then((buf) => downloadBlob(r.containerName, [buf as unknown as BlobPart], "application/octet-stream"))
-        .then(reportDownload)
+      const opfs = r.opfs;
+      void closeOpfsOutFile(opfs)
+        .then(() => opfs.handle.getFile())
+        .then((f) => uploadFileChunked(r.containerName, f))
+        .then(({ url }) => {
+          triggerDownload(r.containerName, url);
+          reportDownload({ ok: true, via: "server", bytes: r.containerSize, detail: "download started via server staging" });
+        })
         .catch((err) => setDlReport({ ok: false, via: "none", error: (err as Error).message }));
     } else if (r.parts) {
       void downloadBlob(r.containerName, r.parts as unknown as BlobPart[], "application/octet-stream").then(reportDownload);
     }
   }, [wrapResult]);
+
+  const transcodeVideo = useCallback((mode: "compress" | "enhance") => {
+    const r = convResult;
+    if (!r || transMode) return;
+    setTransMode(mode);
+    setTransError(undefined);
+    void (async () => {
+      try {
+        const file = new File(r.parts as unknown as BlobPart[], r.fileName, { type: "video/mp4" });
+        const { id } = await uploadFileChunked(r.fileName, file);
+        const { url, bytes } = await transcodeStaged(id, mode);
+        const outName = `${r.fileName.replace(VIDEO_EXT, "")}${mode === "enhance" ? "-enhanced" : "-compressed"}.mp4`;
+        triggerDownload(outName, url);
+        reportDownload({ ok: true, via: "server", bytes, detail: `${mode} complete — download started via server` });
+      } catch (err) {
+        setTransError((err as Error).message);
+      } finally {
+        setTransMode(null);
+      }
+    })();
+  }, [convResult, transMode]);
 
   const convert = useCallback(async (f: File | null) => {
     if (!f || busy.current) return;
@@ -392,6 +397,26 @@ export function SendPage(): JSX.Element {
             >
               Download {convResult.fileName}
             </button>
+            {VIDEO_EXT.test(convResult.fileName) && (
+              <div className="trans-actions">
+                <button
+                  className="btn-download"
+                  disabled={transMode !== null}
+                  onClick={() => transcodeVideo("compress")}
+                >
+                  Compress video (H.264, smaller)
+                </button>
+                <button
+                  className="btn-download"
+                  disabled={transMode !== null}
+                  onClick={() => transcodeVideo("enhance")}
+                >
+                  Enhance video (1080p, denoise)
+                </button>
+              </div>
+            )}
+            {transMode && <p className="resume-msg">Transcoding on the server (ffmpeg)… this can take a while.</p>}
+            {transError && <p className="resume-msg">✗ transcode failed: {transError}</p>}
             {dlReport && (
               <p className={`resume-msg${dlReport.ok ? " dl-ok" : ""}`}>
                 {dlReport.ok

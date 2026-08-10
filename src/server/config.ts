@@ -12,6 +12,7 @@ export interface ZuiServerConfig {
   sessionTtlMs: number;
   sweepIntervalMs: number;
   accessToken: string | undefined;
+  ffmpeg: string;
   rateLimits: {
     general: number;
     chunks: number;
@@ -57,6 +58,7 @@ export function loadConfig(overrides: Partial<ZuiServerConfig> = {}): ZuiServerC
     sessionTtlMs: intEnv("ZUI_SESSION_TTL_MS", 24 * 60 * 60 * 1000),
     sweepIntervalMs: intEnv("ZUI_SWEEP_INTERVAL_MS", 10 * 60 * 1000),
     accessToken: process.env.ZUI_ACCESS_TOKEN?.trim() || undefined,
+    ffmpeg: strEnv("ZUI_FFMPEG", "ffmpeg"),
     rateLimits: {
       general: intEnv("ZUI_RATE_LIMIT_GENERAL", 5000),
       chunks: intEnv("ZUI_RATE_LIMIT_CHUNKS", 6000),

@@ -1,13 +1,16 @@
 import { randomBytes } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { join } from "node:path";
+import { basename, extname, join } from "node:path";
 import type { Request, Response } from "express";
 import { ApiError } from "@server/transfers";
 
 const ID_RE = /^[0-9a-f]{64}$/;
 const TTL_MS = 30 * 60 * 1000;
+
+export type TranscodeMode = "compress" | "enhance";
 
 /**
  * Staging store for browser-side downloads that cannot be delivered as Blob
@@ -21,7 +24,8 @@ export interface TempDownloadStore {
   save(req: Request, name: string, mime: string, maxBytes: number): Promise<{ id: string }>;
   createChunked(name: string, mime: string): Promise<{ id: string }>;
   append(id: string, req: Request, maxBytes: number): Promise<{ bytes: number }>;
-  finalize(id: string): Promise<{ url: string; bytes: number }>;
+  finalize(id: string): Promise<{ url: string; bytes: number; id: string }>;
+  transcode(id: string, mode: TranscodeMode, ffmpegPath: string): Promise<{ url: string; bytes: number }>;
   serve(id: string, res: Response): Promise<void>;
 }
 
@@ -113,11 +117,63 @@ export function createTempDownloadStore(dataDir: string): TempDownloadStore {
       return { bytes };
     },
 
-    async finalize(id): Promise<{ url: string; bytes: number }> {
+    async finalize(id): Promise<{ url: string; bytes: number; id: string }> {
       if (!ID_RE.test(id)) throw new ApiError("invalid download id", 400, "bad_request");
       const meta = await readMeta(id);
       if (meta.bytes === 0) throw new ApiError("empty payload", 400, "bad_request");
-      return { url: `/api/v1/local-download/${id}`, bytes: meta.bytes };
+      return { url: `/api/v1/local-download/${id}`, bytes: meta.bytes, id };
+    },
+
+    async transcode(id, mode, ffmpegPath): Promise<{ url: string; bytes: number }> {
+      if (!ID_RE.test(id)) throw new ApiError("invalid download id", 400, "bad_request");
+      const meta = await readMeta(id);
+      if (meta.bytes === 0) throw new ApiError("empty payload", 400, "bad_request");
+      const outName = sanitizeName(
+        `${basename(meta.name, extname(meta.name)) || "video"}${mode === "enhance" ? "-enhanced" : "-compressed"}.mp4`
+      );
+      const outId = randomBytes(32).toString("hex");
+      const outPath = binPath(outId);
+      const args = [
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        binPath(id),
+        ...(mode === "enhance"
+          ? ["-vf", "scale=-2:1080,hqdn3d=4:3:6:4.5", "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-c:a", "aac", "-b:a", "192k"]
+          : ["-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-c:a", "aac", "-b:a", "128k"]),
+        "-movflags",
+        "+faststart",
+        "-f",
+        "mp4",
+        "-y",
+        outPath,
+      ];
+      const stderr: string[] = [];
+      const proc = spawn(ffmpegPath, args, { stdio: ["ignore", "ignore", "pipe"] });
+      proc.stderr.setEncoding("utf8");
+      proc.stderr.on("data", (chunk: string) => {
+        stderr.push(chunk);
+        if (stderr.length > 60) stderr.shift();
+      });
+      try {
+        await new Promise<void>((resolve, reject) => {
+          proc.once("error", (err) => reject(new ApiError(`ffmpeg unavailable: ${err.message}`, 500, "transcode_failed")));
+          proc.once("close", (code) => {
+            if (code === 0) resolve();
+            else reject(new ApiError(`ffmpeg exited ${code}: ${stderr.join("").slice(-2000)}`, 422, "transcode_failed"));
+          });
+        });
+        const size = (await stat(outPath)).size;
+        await writeFile(metaPath(outId), JSON.stringify({ name: outName, mime: "video/mp4", bytes: size, chunked: false }), "utf8");
+        scheduleSweep(outId);
+        await rm(binPath(id), { force: true });
+        await rm(metaPath(id), { force: true });
+        return { url: `/api/v1/local-download/${outId}`, bytes: size };
+      } catch (err) {
+        await rm(outPath, { force: true }).catch(() => undefined);
+        throw err;
+      }
     },
 
     async serve(id, res): Promise<void> {

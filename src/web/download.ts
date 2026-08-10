@@ -113,6 +113,42 @@ export async function downloadViaServer(name: string, blobParts: BlobPart[]): Pr
 
 type SaveHandle = { createWritable(): Promise<FileSystemWritableFileStream> };
 
+const STAGE_ROOT = "/api/v1/local-download";
+
+/** Uploads a File to the staging store in 16 MiB disk slices (no RAM spike). */
+export async function uploadFileChunked(name: string, file: File): Promise<{ url: string; id: string }> {
+  const createRes = await fetch(`${STAGE_ROOT}/chunked`, {
+    method: "POST",
+    headers: { "Content-Type": "application/octet-stream", ...nameHeader(name) },
+  });
+  if (!createRes.ok) throw new Error(`staging failed (HTTP ${createRes.status})`);
+  const { id } = (await createRes.json()) as { id: string };
+  const CHUNK = SERVER_CHUNK_BYTES;
+  for (let offset = 0; offset < file.size; offset += CHUNK) {
+    const slice = file.slice(offset, Math.min(offset + CHUNK, file.size));
+    const res = await fetch(`${STAGE_ROOT}/chunked/${id}/chunk`, {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: slice,
+    });
+    if (!res.ok) throw new Error(`chunk upload failed (HTTP ${res.status})`);
+  }
+  const finRes = await fetch(`${STAGE_ROOT}/chunked/${id}/finalize`, { method: "POST" });
+  if (!finRes.ok) throw new Error(`finalize failed (HTTP ${finRes.status})`);
+  const data = (await finRes.json()) as { url?: string; id?: string };
+  if (!data.url) throw new Error("staging returned no url");
+  return { url: data.url, id: data.id ?? id };
+}
+
+/** Asks the server to transcode a staged video with ffmpeg (compress/enhance). */
+export async function transcodeStaged(id: string, mode: "compress" | "enhance"): Promise<{ url: string; bytes: number }> {
+  const res = await fetch(`${STAGE_ROOT}/chunked/${id}/transcode?mode=${mode}`, { method: "POST" });
+  if (!res.ok) throw new Error(`transcode failed (HTTP ${res.status})`);
+  const data = (await res.json()) as { url?: string; bytes?: number };
+  if (!data.url) throw new Error("transcode returned no url");
+  return { url: data.url, bytes: data.bytes ?? 0 };
+}
+
 /**
  * Saves bytes to the user's disk, in order of reliability:
  *  1. Native "Save As" streamed to disk (File System Access API, Chrome/Edge)
