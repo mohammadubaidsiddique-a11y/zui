@@ -11,6 +11,10 @@ const SAFE_NAME = (name: string): string => name.replace(/[\\/:*?"<>|\u0000-\u00
 // Single-POST uploads below this size; chunked uploads above (any browser, any size).
 const SERVER_DIRECT_MAX = 128 * 1024 * 1024;
 const SERVER_CHUNK_BYTES = 16 * 1024 * 1024;
+// Server staging is only used up to this size — Render-class hosts have ~1 GB
+// of ephemeral disk, and a multi-GB video would kill them. Bigger files stream
+// straight from the browser (picker / blob URL) with no server involvement.
+const SERVER_STAGE_MAX = 384 * 1024 * 1024;
 // Files above this are never read back for verification — reading a 2 GB file
 // back into RAM to "check" it is exactly what used to freeze the tab.
 const VERIFY_READBACK_MAX = 16 * 1024 * 1024;
@@ -285,6 +289,23 @@ export async function downloadBlob(
       // Picker failed before writing anything — fall through to the server route.
     }
   }
+  if (total > SERVER_STAGE_MAX) {
+    try {
+      const blob = new Blob(blobParts, { type });
+      const url = URL.createObjectURL(blob);
+      fireAnchor(url, true, name);
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      onProgress?.(total, total);
+      return {
+        ok: true,
+        via: "anchor",
+        bytes: blob.size,
+        detail: `${blob.size} bytes streamed directly from the browser (file too big for server staging)`,
+      };
+    } catch (err) {
+      return { ok: false, via: "anchor", error: (err as Error)?.message ?? String(err) };
+    }
+  }
   const server = await downloadViaServer(name, blobParts, onProgress);
   if (server.ok) return server;
   try {
@@ -344,6 +365,23 @@ export async function downloadFile(
         return { ok: false, via: "picker", error: (err as Error)?.message ?? String(err) };
       }
       // Picker failed before writing anything — fall through to the server route.
+    }
+  }
+  if (total > SERVER_STAGE_MAX) {
+    // Too big to stage on the server (Render has ~1 GB disk). Stream straight
+    // from the browser: blob URLs read from disk/OPFS without RAM.
+    try {
+      const url = URL.createObjectURL(file);
+      fireAnchor(url, true, name);
+      onProgress?.(total, total);
+      return {
+        ok: true,
+        via: "anchor",
+        bytes: total,
+        detail: `${total} bytes streamed directly from the browser (file too big for server staging)`,
+      };
+    } catch (err) {
+      return { ok: false, via: "anchor", error: (err as Error)?.message ?? String(err) };
     }
   }
   try {
