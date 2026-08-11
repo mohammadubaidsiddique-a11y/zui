@@ -258,9 +258,11 @@ export async function downloadBlob(
   const activation = (navigator as Navigator & { userActivation?: { isActive: boolean } }).userActivation;
   const activationOk = typeof activation === "undefined" ? true : activation.isActive;
   if (typeof pick === "function" && !isAutomated && activationOk) {
+    let wroteAny = false;
     try {
       const handle = await pick({ suggestedName: name });
       await pickerWrite(handle, name, blobParts, onProgress);
+      wroteAny = true;
       // Read-back only for small files — verifying a multi-GB save would
       // itself load the whole file into RAM and freeze the tab.
       if (total <= VERIFY_READBACK_MAX) {
@@ -274,7 +276,13 @@ export async function downloadBlob(
       return { ok: true, via: "picker", bytes: total, detail: `${total} bytes` };
     } catch (err) {
       if ((err as Error).name === "AbortError") return { ok: false, via: "picker", error: "cancelled" };
-      // Picker failed for another reason — fall through to the server route.
+      if (wroteAny) {
+        // The save already produced a (possibly partial) file on disk. Falling
+        // through to the server route would fire a SECOND download of the same
+        // bytes — report the failure instead of double-downloading.
+        return { ok: false, via: "picker", error: (err as Error)?.message ?? String(err) };
+      }
+      // Picker failed before writing anything — fall through to the server route.
     }
   }
   const server = await downloadViaServer(name, blobParts, onProgress);
@@ -313,9 +321,11 @@ export async function downloadFile(
   const activation = (navigator as Navigator & { userActivation?: { isActive: boolean } }).userActivation;
   const activationOk = typeof activation === "undefined" ? true : activation.isActive;
   if (typeof pick === "function" && !isAutomated && activationOk) {
+    let wroteAny = false;
     try {
       const handle = await pick({ suggestedName: name });
       await pickerWrite(handle, name, [file], onProgress);
+      wroteAny = true;
       // Read-back only for small files — verifying a multi-GB save would
       // itself load the whole file into RAM and freeze the tab.
       if (total <= VERIFY_READBACK_MAX) {
@@ -327,7 +337,13 @@ export async function downloadFile(
       return { ok: true, via: "picker", bytes: total, detail: `${total} bytes streamed from disk` };
     } catch (err) {
       if ((err as Error).name === "AbortError") return { ok: false, via: "picker", error: "cancelled" };
-      // Picker failed for another reason — fall through to the server route.
+      if (wroteAny) {
+        // The save already produced a (possibly partial) file on disk. Falling
+        // through to the server route would fire a SECOND download of the same
+        // bytes — report the failure instead of double-downloading.
+        return { ok: false, via: "picker", error: (err as Error)?.message ?? String(err) };
+      }
+      // Picker failed before writing anything — fall through to the server route.
     }
   }
   try {

@@ -80,17 +80,19 @@ export function SendPage(): JSX.Element {
   const [dlReport, setDlReport] = useState<DownloadReport | null>(null);
   const [dlBusy, setDlBusy] = useState<"wrap" | "conv" | null>(null);
   const [dlPct, setDlPct] = useState(0);
-  const [wrapCompress, setWrapCompress] = useState(true);
+  const [wrapCompress, setWrapCompress] = useState(false);
   const [wrapStep, setWrapStep] = useState("");
   const [compressedOrigSize, setCompressedOrigSize] = useState<number | null>(null);
 
   const [dragOver, setDragOver] = useState<"wrap" | "conv" | null>(null);
   const busy = useRef(false);
+  const dlBusyRef = useRef(false);
   const wrapFileRef = useRef<File | null>(null);
 
   const reportDownload = (r: DownloadReport): void => {
     setDlReport(r);
     setDlBusy(null);
+    dlBusyRef.current = false;
     if (r.ok) {
       window.setTimeout(() => setDlReport(null), 15_000);
     }
@@ -99,9 +101,10 @@ export function SendPage(): JSX.Element {
   /** One download at a time: immediate feedback, live progress, button locked. */
   const startDownload = useCallback(
     (panel: "wrap" | "conv") => {
-      if (dlBusy) return;
+      if (dlBusyRef.current) return;
       const r = panel === "wrap" ? wrapResult : convResult;
       if (!r) return;
+      dlBusyRef.current = true;
       setDlBusy(panel);
       setDlPct(0);
       setDlReport(null);
@@ -328,8 +331,10 @@ export function SendPage(): JSX.Element {
               <div className="dropzone-title">{wrapResult.originalName}</div>
               <div className="dropzone-subtitle">
                 {compressedOrigSize
-                  ? `original ${formatBytes(wrapResult.originalSize)} → re-encoded ${formatBytes(compressedOrigSize)} (H.264) → .zui ${formatBytes(wrapResult.containerSize)}`
-                  : `${formatBytes(wrapResult.originalSize)} → ${formatBytes(wrapResult.containerSize)} ${wrapMode === "deflate-raw" && wrapResult.containerSize < wrapResult.originalSize ? "(deflate-compressed)" : "(stored as-is — this data is already compressed, so lossless packaging can't shrink it)"}`}
+                  ? `original ${formatBytes(wrapResult.originalSize)} → re-encoded ${formatBytes(compressedOrigSize)} (H.264) → .zui ${formatBytes(wrapResult.containerSize)} — restore returns the re-encoded video`
+                  : VIDEO_EXT.test(wrapResult.originalName)
+                    ? `${formatBytes(wrapResult.originalSize)} → ${formatBytes(wrapResult.containerSize)} — stored losslessly; restore returns your video byte-for-byte (same quality)`
+                    : `${formatBytes(wrapResult.originalSize)} → ${formatBytes(wrapResult.containerSize)} ${wrapMode === "deflate-raw" && wrapResult.containerSize < wrapResult.originalSize ? "(deflate-compressed)" : "(stored as-is — this data is already compressed, so lossless packaging can't shrink it)"}`}
               </div>
             </>
           ) : (
@@ -350,7 +355,7 @@ export function SendPage(): JSX.Element {
             disabled={wrapState === "busy"}
             onChange={(e) => setWrapCompress(e.target.checked)}
           />
-          Compress videos while packaging — the .zui holds a smaller re-encoded H.264 video
+          Compress videos while packaging — smaller .zui, but restore gives back the re-encoded video (not your exact original). Off by default so restore is byte-exact.
         </label>
 
         {wrapState === "busy" && (
@@ -374,8 +379,8 @@ export function SendPage(): JSX.Element {
           <div className="wrap-result">
             <p className="wrap-line">
               {compressedOrigSize
-                ? `Video re-encoded ${formatBytes(wrapResult.originalSize)} → ${formatBytes(compressedOrigSize)}, then packaged → ${formatBytes(wrapResult.containerSize)}. The .zui is ready — download it:`
-                : `Packaged ${formatBytes(wrapResult.originalSize)} → ${formatBytes(wrapResult.containerSize)}. The .zui is ready — download it:`}
+                ? `Video re-encoded ${formatBytes(wrapResult.originalSize)} → ${formatBytes(compressedOrigSize)}, then packaged → ${formatBytes(wrapResult.containerSize)}. Restore returns the re-encoded video. The .zui is ready — download it:`
+                : `Packaged ${formatBytes(wrapResult.originalSize)} → ${formatBytes(wrapResult.containerSize)}. Restore returns your file byte-exact. The .zui is ready — download it:`}
             </p>
             <button
               className="btn-download"
