@@ -159,6 +159,11 @@ export async function transcodeStaged(id: string, mode: "compress" | "enhance" |
  */
 export async function downloadBlob(name: string, blobParts: BlobPart[], type: string): Promise<DownloadReport> {
   const pick = (window as { showSaveFilePicker?: (opts?: unknown) => Promise<SaveHandle> }).showSaveFilePicker;
+  const total = blobParts.reduce(
+    (s, p) => s + (typeof p === "string" ? p.length : p instanceof Blob ? p.size : p.byteLength),
+    0
+  );
+  if (total <= 0) return { ok: false, via: "none", error: "nothing to download (0 bytes)" };
   // Only offer the native dialog to a real user in a real browser. In
   // automated/embedded contexts showSaveFilePicker exists but rejects with
   // AbortError (silently yielding nothing) or never resolves; the server
@@ -168,10 +173,6 @@ export async function downloadBlob(name: string, blobParts: BlobPart[], type: st
   const activationOk = typeof activation === "undefined" ? true : activation.isActive;
   if (typeof pick === "function" && !isAutomated && activationOk) {
     try {
-      const total = blobParts.reduce(
-        (s, p) => s + (typeof p === "string" ? p.length : p instanceof Blob ? p.size : p.byteLength),
-        0
-      );
       const handle = await pick({ suggestedName: name });
       const writable = await handle.createWritable();
       for (const part of blobParts) {

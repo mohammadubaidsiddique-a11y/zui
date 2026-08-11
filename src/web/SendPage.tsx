@@ -124,6 +124,18 @@ export function SendPage(): JSX.Element {
       );
       if (total <= 0) throw new Error("empty container produced");
 
+      // Prove the container is valid BEFORE offering the Download button —
+      // a broken or zero-byte .zui must never be downloadable.
+      const partsSource = (): ByteSource => ({
+        async *[Symbol.asyncIterator]() {
+          for (const part of memoryParts) yield part;
+        },
+      });
+      const check = await verifyZui(partsSource());
+      if (!check.valid) {
+        throw new Error(`container failed self-check: ${check.errors.join("; ")}`);
+      }
+
       const containerName = `${f.name}.zui`;
       const result: WrapResult = {
         originalName: f.name,
