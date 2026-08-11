@@ -81,8 +81,11 @@ export async function downloadViaServer(name: string, blobParts: BlobPart[]): Pr
         body,
       });
       if (!res.ok) return { ok: false, via: "server", error: `staging failed (HTTP ${res.status})` };
-      const data = (await res.json()) as { url?: string };
+      const data = (await res.json()) as { url?: string; bytes?: number };
       url = data.url;
+      if (typeof data.bytes === "number" && data.bytes !== total) {
+        return { ok: false, via: "server", error: `staging stored ${data.bytes} of ${total} bytes — try the download again` };
+      }
     } else {
       const createRes = await fetch("/api/v1/local-download/chunked", {
         method: "POST",
@@ -100,8 +103,11 @@ export async function downloadViaServer(name: string, blobParts: BlobPart[]): Pr
       }
       const finRes = await fetch(`/api/v1/local-download/chunked/${id}/finalize`, { method: "POST" });
       if (!finRes.ok) return { ok: false, via: "server", error: `finalize failed (HTTP ${finRes.status})` };
-      const data = (await finRes.json()) as { url?: string };
+      const data = (await finRes.json()) as { url?: string; bytes?: number };
       url = data.url;
+      if (typeof data.bytes === "number" && data.bytes !== total) {
+        return { ok: false, via: "server", error: `staging stored ${data.bytes} of ${total} bytes — try the download again` };
+      }
     }
     if (!url) return { ok: false, via: "server", error: "staging returned no url" };
     fireAnchor(url, false, name);
@@ -111,7 +117,10 @@ export async function downloadViaServer(name: string, blobParts: BlobPart[]): Pr
   }
 }
 
-type SaveHandle = { createWritable(): Promise<FileSystemWritableFileStream> };
+type SaveHandle = {
+  createWritable(): Promise<FileSystemWritableFileStream>;
+  getFile(): Promise<File>;
+};
 
 const STAGE_ROOT = "/api/v1/local-download";
 
@@ -180,6 +189,12 @@ export async function downloadBlob(name: string, blobParts: BlobPart[], type: st
         await writable.write(chunk);
       }
       await writable.close();
+      const written = await handle.getFile();
+      if (written.size !== total) {
+        throw new Error(
+          `selected file only received ${written.size} of ${total} bytes — saving was interrupted; trying the server route`
+        );
+      }
       return { ok: true, via: "picker", bytes: total, detail: `${total} bytes` };
     } catch (err) {
       if ((err as Error).name === "AbortError") return { ok: false, via: "picker", error: "cancelled" };

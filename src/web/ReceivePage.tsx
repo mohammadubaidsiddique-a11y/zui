@@ -52,6 +52,7 @@ export function ReceivePage({ share }: { share: string }): JSX.Element {
   const [chunkCount, setChunkCount] = useState(1);
   const [overallSha, setOverallSha] = useState("");
   const [backend, setBackend] = useState("");
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
 
   const sinkRef = useRef<ChunkSink | null>(null);
   const resumedRef = useRef(false);
@@ -113,6 +114,7 @@ export function ReceivePage({ share }: { share: string }): JSX.Element {
   useEffect(() => {
     let cancelled = false;
     stoppedRef.current = false;
+    setPreviewUrl(null);
     (async () => {
       try {
         const first = await fetchSession();
@@ -237,6 +239,67 @@ export function ReceivePage({ share }: { share: string }): JSX.Element {
     };
   }, [stage, fetchSession]);
 
+  useEffect(() => {
+    if (stage !== "done" || !meta) return;
+    let active = true;
+    const sink = sinkRef.current;
+    if (!sink) return;
+
+    const isImage = meta.mimeType.startsWith("image/") || /\.(jpg|jpeg|png|gif|webp|svg)$/i.test(meta.fileName);
+    const isVideo = meta.mimeType.startsWith("video/") || /\.(mp4|webm|ogg|mov)$/i.test(meta.fileName);
+
+    if (isImage || isVideo) {
+      (async () => {
+        try {
+          let blob: Blob;
+          if (sink.getFile) {
+            blob = await sink.getFile();
+          } else {
+            const chunks: Uint8Array[] = [];
+            await sink.readAll(async (chunk) => {
+              chunks.push(chunk);
+            });
+            blob = new Blob(chunks as unknown as BlobPart[]);
+          }
+          if (!active) return;
+
+          let mime = meta.mimeType;
+          if (!mime || mime === "application/octet-stream" || mime === "binary") {
+            if (/\.(jpg|jpeg)$/i.test(meta.fileName)) mime = "image/jpeg";
+            else if (/\.png$/i.test(meta.fileName)) mime = "image/png";
+            else if (/\.gif$/i.test(meta.fileName)) mime = "image/gif";
+            else if (/\.webp$/i.test(meta.fileName)) mime = "image/webp";
+            else if (/\.svg$/i.test(meta.fileName)) mime = "image/svg+xml";
+            else if (/\.mp4$/i.test(meta.fileName)) mime = "video/mp4";
+            else if (/\.webm$/i.test(meta.fileName)) mime = "video/webm";
+            else if (/\.ogg$/i.test(meta.fileName)) mime = "video/ogg";
+            else if (/\.mov$/i.test(meta.fileName)) mime = "video/quicktime";
+          }
+
+          const typedBlob = blob.type === mime ? blob : new Blob([blob], { type: mime });
+          const url = URL.createObjectURL(typedBlob);
+          if (active) {
+            setPreviewUrl(url);
+          }
+        } catch (e) {
+          console.error("Failed to generate preview URL", e);
+        }
+      })();
+    }
+
+    return () => {
+      active = false;
+    };
+  }, [stage, meta]);
+
+  useEffect(() => {
+    return () => {
+      if (previewUrl) {
+        URL.revokeObjectURL(previewUrl);
+      }
+    };
+  }, [previewUrl]);
+
   const downloadOriginal = useCallback(() => {
     const m = metaRef.current;
     const sink = sinkRef.current;
@@ -296,6 +359,15 @@ export function ReceivePage({ share }: { share: string }): JSX.Element {
               <div className="success">✓ SHA-256 verified for {meta.fileName}</div>
               <div className="mono sha-line">expected: {meta.sha256}</div>
               <div className="mono sha-line">received: {overallSha}</div>
+              {previewUrl && (
+                <div className="recv-preview">
+                  {meta.mimeType.startsWith("image/") || /\.(jpg|jpeg|png|gif|webp|svg)$/i.test(meta.fileName) ? (
+                    <img src={previewUrl} alt={meta.fileName} />
+                  ) : (
+                    <video src={previewUrl} controls />
+                  )}
+                </div>
+              )}
               <button className="btn primary" onClick={downloadOriginal}>
                 Download {meta.fileName}
               </button>

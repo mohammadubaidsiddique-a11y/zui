@@ -10,6 +10,7 @@ export interface ChunkSink {
   size(): Promise<number>;
   readAll(onChunk: (bytes: Uint8Array) => Promise<void>): Promise<void>;
   saveToUserFile(suggestedName: string, mime: string): Promise<boolean>;
+  getFile?(): Promise<File>;
 }
 
 
@@ -121,8 +122,17 @@ function openOpfsAsync(fileId: string, chunkSize: number): Promise<ChunkSink> {
           await onChunk(new Uint8Array(raw));
         }
       },
+      async getFile() {
+        return handle.getFile();
+      },
       async saveToUserFile(suggestedName: string, _mime: string) {
-        const f = await handle.getFile();
+        let f: File;
+        try {
+          f = await handle.getFile();
+        } catch {
+          const fresh = await navigator.storage.getDirectory();
+          f = await (await fresh.getFileHandle(dataName(fileId))).getFile();
+        }
         const picker = (
           globalThis as unknown as { showSaveFilePicker?: (o?: { suggestedName?: string }) => Promise<SaveHandleLike> }
         ).showSaveFilePicker;
@@ -141,7 +151,8 @@ function openOpfsAsync(fileId: string, chunkSize: number): Promise<ChunkSink> {
             /* picker rejected — fall back to blob download */
           }
         }
-        const url = URL.createObjectURL(f);
+        const blob = new Blob([f], { type: _mime || "application/octet-stream" });
+        const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
         a.download = suggestedName;
@@ -225,42 +236,73 @@ function openOpfsWorker(fileId: string, chunkSize: number): Promise<ChunkSink> {
     }
   };
 
-  return call("init", { fileId, chunkSize }).then(() => ({
-    kind: "opfs-worker" as const,
-    async open() {
-      await call("init", { fileId, chunkSize });
-    },
-    async writeChunk(index: number, bytes: Uint8Array) {
-      const copy = new Uint8Array(bytes.byteLength);
-      copy.set(bytes);
-      const r = await call("put", { index, data: copy.buffer }, [copy.buffer]);
-      if (r.op === "error") throw new Error(r.message ?? "worker write failed");
-    },
-    async completedChunks() {
-      return 0;
-    },
-    async finish() {
-      await call("flush");
-    },
-    async reset() {
-      worker.terminate();
-    },
-    async size() {
-      const r = await call("size");
-      return r.size ?? 0;
-    },
-    async readAll(onChunk) {
-      const total = (await call("size")).size ?? 0;
-      for (let at = 0; at < total; at += chunkSize) {
-        const r = await call("read", { at, length: chunkSize });
-        if (r.op === "data") await onChunk(new Uint8Array(r.data ?? new ArrayBuffer(0)));
-        else break;
-      }
-    },
-    async saveToUserFile() {
-      return false;
-    },
-  }));
+  return call("init", { fileId, chunkSize }).then(() => {
+    const sink: ChunkSink = {
+      kind: "opfs-worker" as const,
+      async open() {
+        await call("init", { fileId, chunkSize });
+      },
+      async writeChunk(index: number, bytes: Uint8Array) {
+        const copy = new Uint8Array(bytes.byteLength);
+        copy.set(bytes);
+        const r = await call("put", { index, data: copy.buffer }, [copy.buffer]);
+        if (r.op === "error") throw new Error(r.message ?? "worker write failed");
+      },
+      async completedChunks() {
+        return 0;
+      },
+      async finish() {
+        await call("flush");
+      },
+      async reset() {
+        worker.terminate();
+      },
+      async size() {
+        const r = await call("size");
+        return r.size ?? 0;
+      },
+      async readAll(onChunk) {
+        const total = (await call("size")).size ?? 0;
+        for (let at = 0; at < total; at += chunkSize) {
+          const r = await call("read", { at, length: chunkSize });
+          if (r.op === "data") await onChunk(new Uint8Array(r.data ?? new ArrayBuffer(0)));
+          else break;
+        }
+      },
+      async saveToUserFile(suggestedName: string, mime: string) {
+        const picker = (
+          globalThis as unknown as { showSaveFilePicker?: (o?: { suggestedName?: string }) => Promise<SaveHandleLike> }
+        ).showSaveFilePicker;
+        if (typeof picker === "function") {
+          try {
+            const target = await picker({ suggestedName });
+            const out = await target.createWritable();
+            await sink.readAll(async (chunk) => {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              await out.write(chunk as any);
+            });
+            await out.close();
+            return true;
+          } catch {
+            /* picker rejected — fall back */
+          }
+        }
+        const chunks: Uint8Array[] = [];
+        await sink.readAll(async (chunk) => {
+          chunks.push(chunk);
+        });
+        const blob = new Blob(chunks as unknown as BlobPart[], { type: mime || "application/octet-stream" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = suggestedName;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 30_000);
+        return false;
+      },
+    };
+    return sink;
+  });
 }
 function openCacheBackend(fileId: string, chunkSize: number): Promise<ChunkSink> {
   return caches.open(`zui-${fileId}`).then(async (cache) => {
@@ -274,7 +316,7 @@ function openCacheBackend(fileId: string, chunkSize: number): Promise<ChunkSink>
         return 0;
       }
     };
-    return {
+    const sink: ChunkSink = {
       kind: "cache" as const,
       async open() {
         await chunkCount();
@@ -307,10 +349,39 @@ function openCacheBackend(fileId: string, chunkSize: number): Promise<ChunkSink>
           await onChunk(new Uint8Array(raw));
         }
       },
-      async saveToUserFile() {
+      async saveToUserFile(suggestedName: string, mime: string) {
+        const picker = (
+          globalThis as unknown as { showSaveFilePicker?: (o?: { suggestedName?: string }) => Promise<SaveHandleLike> }
+        ).showSaveFilePicker;
+        if (typeof picker === "function") {
+          try {
+            const target = await picker({ suggestedName });
+            const out = await target.createWritable();
+            await sink.readAll(async (chunk) => {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              await out.write(chunk as any);
+            });
+            await out.close();
+            return true;
+          } catch {
+            /* picker rejected — fall back */
+          }
+        }
+        const chunks: Uint8Array[] = [];
+        await sink.readAll(async (chunk) => {
+          chunks.push(chunk);
+        });
+        const blob = new Blob(chunks as unknown as BlobPart[], { type: mime || "application/octet-stream" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = suggestedName;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 30_000);
         return false;
       },
     };
+    return sink;
   });
 }
 

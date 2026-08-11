@@ -251,8 +251,8 @@ export function createApp(ctx: ZuiAppContext): express.Express {
       }
       if (rawName.length > 512) throw new ApiError("file name too long", 400, "bad_request");
       const mime = (req.headers["content-type"] ?? "application/octet-stream").split(";")[0].trim();
-      const { id } = await tempDownloads.save(req, rawName, mime, config.maxSessionBytes);
-      res.status(201).json({ url: `/api/v1/local-download/${id}` });
+      const { id, bytes } = await tempDownloads.save(req, rawName, mime, config.maxSessionBytes);
+      res.status(201).json({ url: `/api/v1/local-download/${id}`, bytes });
     } catch (err) {
       next(err);
     }
@@ -328,7 +328,7 @@ export function createApp(ctx: ZuiAppContext): express.Express {
         index: "index.html",
         maxAge: "1h",
         setHeaders: (res, filePath) => {
-          if (filePath.endsWith(".html")) res.setHeader("Cache-Control", "no-cache");
+          if (filePath.endsWith(".html")) res.setHeader("Cache-Control", "no-store");
         },
       })
     );
@@ -337,7 +337,7 @@ export function createApp(ctx: ZuiAppContext): express.Express {
         next();
         return;
       }
-      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Cache-Control", "no-store");
       res.sendFile(join(webDist, "index.html"));
     });
   }

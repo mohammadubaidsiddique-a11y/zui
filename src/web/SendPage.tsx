@@ -1,4 +1,3 @@
-/* global BufferSource */
 import { useCallback, useRef, useState, type JSX } from "react";
 import { encodeZui, verifyZui, ZuiDecoder, probeCompressible, type ByteSink, type ByteSource } from "@codec/index";
 import { ShareCard } from "./ShareCard";
@@ -203,10 +202,21 @@ export function SendPage(): JSX.Element {
     setConvResult(null);
     setConvError(undefined);
     try {
+      if (f.size === 0) {
+        setConvState("error");
+        setConvError(
+          `This .zui file is empty (0 bytes) — the download that produced it failed. Delete it, download the .zui again, and try restoring the new file.`
+        );
+        return;
+      }
       const check = await verifyZui(fileSource(f, setConvProgress));
       if (!check.valid) {
         setConvState("error");
-        setConvError(`Not a valid ZUI container: ${check.errors.join("; ")}`);
+        setConvError(
+          check.errors.some((e) => e.startsWith("unexpected end of stream") || /needed \d+ more bytes/.test(e))
+            ? `This .zui is truncated (${formatBytes(f.size)} on disk) — it did not download completely. Delete it, download the .zui again, and try restoring the new file.`
+            : `Not a valid ZUI container: ${check.errors.join("; ")}`
+        );
         return;
       }
       const decoder = await ZuiDecoder.open(fileSource(f));
@@ -287,7 +297,7 @@ export function SendPage(): JSX.Element {
             </div>
             <span className="progress-label">
               {wrapMode === "none"
-                ? `packaging ${formatBytes(wrapBytes)} / ${formatBytes(wrapFileRef.current?.size ?? 0)} — deflate skipped… ${wrapPct}%`
+                ? `packaging ${formatBytes(wrapBytes)} / ${formatBytes(wrapFileRef.current?.size ?? 0)} — already-compressed data can't shrink, stored raw… ${wrapPct}%`
                 : `compressing ${formatBytes(wrapBytes)} / ${formatBytes(wrapFileRef.current?.size ?? 0)}… ${wrapPct}%`}
             </span>
           </div>

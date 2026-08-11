@@ -21,7 +21,7 @@ export type TranscodeMode = "compress" | "enhance" | "frame";
  * served and TTL-swept regardless.
  */
 export interface TempDownloadStore {
-  save(req: Request, name: string, mime: string, maxBytes: number): Promise<{ id: string }>;
+  save(req: Request, name: string, mime: string, maxBytes: number): Promise<{ id: string; bytes: number }>;
   createChunked(name: string, mime: string): Promise<{ id: string }>;
   append(id: string, req: Request, maxBytes: number): Promise<{ bytes: number }>;
   finalize(id: string): Promise<{ url: string; bytes: number; id: string }>;
@@ -80,7 +80,7 @@ export function createTempDownloadStore(dataDir: string): TempDownloadStore {
   };
 
   return {
-    async save(req, name, mime, maxBytes): Promise<{ id: string }> {
+    async save(req, name, mime, maxBytes): Promise<{ id: string; bytes: number }> {
       await mkdir(dir, { recursive: true });
       const id = randomBytes(32).toString("hex");
       const filePath = binPath(id);
@@ -93,7 +93,7 @@ export function createTempDownloadStore(dataDir: string): TempDownloadStore {
           "utf8"
         );
         scheduleSweep(id);
-        return { id };
+        return { id, bytes };
       } catch (err) {
         await rm(filePath, { force: true }).catch(() => undefined);
         await rm(metaPath(id), { force: true }).catch(() => undefined);
