@@ -2,7 +2,6 @@
 import { useCallback, useRef, useState, type JSX } from "react";
 import { encodeZui, verifyZui, ZuiDecoder, probeCompressible, type ByteSink, type ByteSource } from "@codec/index";
 import { ShareCard } from "./ShareCard";
-import { cleanupStaleWrapFiles, closeOpfsOutFile, createOpfsOutFile, opfsAvailable, type OpfsOutFile } from "./opfs";
 import { downloadBlob, transcodeStaged, triggerDownload, uploadFileChunked, type DownloadReport } from "./download";
 
 const formatBytes = (n: number): string => {
@@ -44,8 +43,7 @@ interface WrapResult {
   originalSize: number;
   containerName: string;
   containerSize: number;
-  parts?: Uint8Array[];
-  opfs?: OpfsOutFile;
+  parts: Uint8Array[];
 }
 
 interface UnwrapResult {
@@ -94,10 +92,6 @@ export function SendPage(): JSX.Element {
     setWrapResult(null);
     setWrapError(undefined);
     try {
-      // A new wrap replaces the old one: purge the OPFS file it referenced.
-      // They are never deleted on a timer (the button must stay valid).
-      void cleanupStaleWrapFiles(null);
-
       // Instant path: already-compressed media (video/audio/archives) is
       // entropy-probed and packaged WITHOUT deflate — no CPU burn on 2GB.
       const probeSample = new Uint8Array(await f.slice(0, Math.min(f.size, 512 * 1024)).arrayBuffer());
@@ -105,33 +99,19 @@ export function SendPage(): JSX.Element {
         probeCompressible(probeSample) || f.size <= 8 * 1024 * 1024 ? "deflate-raw" : ("none" as const);
       setWrapMode(compression);
 
-      // Disk-backed output: the container streams to OPFS and the download
-      // streams from there — a multi-GB wrap never lives fully in RAM.
-      // Headless (automation) Chromium has a broken OPFS write path for
-      // multi-hundred-MB files (unreachable writable), so automation uses
-      // the memory path; real browsers always prefer OPFS.
-      let total = 0;
-      let opfsOut: OpfsOutFile | null = null;
+      // The container is built in memory — pure JS, no OPFS, so a wrap can
+      // never stall at 100% (OPFS writables deadlock Chromium at large
+      // sizes). Download always streams the parts through the server in
+      // 16 MiB slices, so the button can never no-op either.
       const memoryParts: Uint8Array[] = [];
-      const useOpfs = !navigator.webdriver && (await opfsAvailable());
-      let sink: ByteSink;
-      if (useOpfs) {
-        opfsOut = await createOpfsOutFile("zui-wrap");
-        sink = {
-          write: (b) => {
-            total += b.byteLength;
-            return opfsOut!.writable.write(b as unknown as BufferSource);
-          },
-        };
-      } else {
-        sink = {
-          write: (b) => {
-            memoryParts.push(Uint8Array.from(b));
-            total += b.byteLength;
-            return Promise.resolve();
-          },
-        };
-      }
+      let total = 0;
+      const sink: ByteSink = {
+        write: (b) => {
+          memoryParts.push(Uint8Array.from(b));
+          total += b.byteLength;
+          return Promise.resolve();
+        },
+      };
 
       await encodeZui(
         () => fileSource(f, setWrapProgress),
@@ -150,11 +130,8 @@ export function SendPage(): JSX.Element {
         originalSize: f.size,
         containerName,
         containerSize: total,
-        ...(opfsOut ? { opfs: opfsOut } : { parts: memoryParts }),
+        parts: memoryParts,
       };
-      // Deliberately NO object URL for the container: URL.createObjectURL()
-      // on a large OPFS-backed File deadlocks Chromium. Every download goes
-      // through the button, which streams disk slices via the server.
       setWrapResult(result);
       setWrapState("done");
     } catch (err) {
@@ -168,23 +145,11 @@ export function SendPage(): JSX.Element {
   const redownload = useCallback(() => {
     const r = wrapResult;
     if (!r) return;
-    // Reliable ladder: native picker → server-mediated → anchor — with the
-    // picker handled natively and everything else going through the server in
-    // 16 MiB slices streamed from disk (no RAM spike, no blob-URL truncation
-    // for multi-GB containers, never a silent no-op or zero-byte file).
-    if (r.opfs) {
-      const opfs = r.opfs;
-      void closeOpfsOutFile(opfs)
-        .then(() => opfs.handle.getFile())
-        .then((f) => uploadFileChunked(r.containerName, f))
-        .then(({ url }) => {
-          triggerDownload(r.containerName, url);
-          reportDownload({ ok: true, via: "server", bytes: r.containerSize, detail: "download started via server staging" });
-        })
-        .catch((err) => setDlReport({ ok: false, via: "none", error: (err as Error).message }));
-    } else if (r.parts) {
-      void downloadBlob(r.containerName, r.parts as unknown as BlobPart[], "application/octet-stream").then(reportDownload);
-    }
+    if (!r.parts) return;
+    // Reliable ladder: native picker → server-mediated → anchor. Large
+    // payloads go through the server in 16 MiB slices, so this never
+    // no-ops and never produces a zero-byte file.
+    void downloadBlob(r.containerName, r.parts as unknown as BlobPart[], "application/octet-stream").then(reportDownload);
   }, [wrapResult]);
 
   const transcodeVideo = useCallback((mode: "compress" | "enhance" | "frame") => {
@@ -322,7 +287,7 @@ export function SendPage(): JSX.Element {
           <div className="wrap-result">
             <p className="wrap-line">
               Compressed {formatBytes(wrapResult.originalSize)} → {formatBytes(wrapResult.containerSize)}.
-              {wrapResult.opfs && " The download started — check your downloads folder."}
+              The .zui is ready — download it:
             </p>
             <button className="btn-download" onClick={redownload}>
               Download {wrapResult.containerName}
