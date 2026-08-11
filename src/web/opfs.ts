@@ -140,7 +140,7 @@ export async function cleanupStaleWrapFiles(exceptName: string | null): Promise<
       values(): AsyncIterableIterator<FileSystemFileHandle>;
     }).values();
     for await (const handle of values) {
-      if (handle.kind === "file" && /^zui-wrap-.*\.zui$/.test(handle.name) && handle.name !== exceptName) {
+      if (handle.kind === "file" && /^zui-(wrap|restore)-.*\.zui$/.test(handle.name) && handle.name !== exceptName) {
         await root.removeEntry(handle.name).catch(() => undefined);
       }
     }

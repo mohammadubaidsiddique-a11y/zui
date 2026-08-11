@@ -57,7 +57,8 @@ interface WrapResult {
 interface UnwrapResult {
   fileName: string;
   size: number;
-  parts: Uint8Array[];
+  parts?: Uint8Array[];
+  file?: File;
 }
 
 type JobState = "idle" | "busy" | "done" | "error";
@@ -199,7 +200,8 @@ export function SendPage(): JSX.Element {
     setTransError(undefined);
     void (async () => {
       try {
-        const file = new File(r.parts as unknown as BlobPart[], r.fileName, { type: "video/mp4" });
+        const file =
+          r.file ?? new File((r.parts ?? []) as unknown as BlobPart[], r.fileName, { type: "video/mp4" });
         const { id } = await uploadFileChunked(r.fileName, file);
         const { url, bytes } = await transcodeStaged(id, mode);
         const stem = r.fileName.replace(VIDEO_EXT, "");
@@ -249,14 +251,29 @@ export function SendPage(): JSX.Element {
         return;
       }
       const decoder = await ZuiDecoder.open(fileSource(f));
+      // Big restores stream to disk instead of buffering in RAM (same rule
+      // as wrapping) — a 3 GB video must not live in the tab's memory.
+      const diskOut =
+        f.size > 64 * 1024 * 1024 && (await opfsAvailable()) ? await createOpfsOutFile("zui-restore") : null;
+      if (diskOut) await cleanupStaleWrapFiles(diskOut.name);
       const parts: Uint8Array[] = [];
       let size = 0;
       for await (const raw of decoder.reconstruct()) {
-        const copy = Uint8Array.from(raw);
-        parts.push(copy);
-        size += copy.byteLength;
+        size += raw.byteLength;
+        if (diskOut) {
+          await diskOut.writable.write(raw as unknown as Uint8Array<ArrayBuffer>);
+        } else {
+          parts.push(Uint8Array.from(raw));
+        }
       }
-      setConvResult({ fileName: decoder.header.fileName || f.name.replace(/\.zui$/, ""), size, parts });
+      if (diskOut) await closeOpfsOutFile(diskOut);
+      const fileName = decoder.header.fileName || f.name.replace(/\.zui$/, "");
+      setConvResult({
+        fileName,
+        size,
+        parts: diskOut ? undefined : parts,
+        file: diskOut ? await diskOut.handle.getFile() : undefined,
+      });
       setConvState("done");
       if (size <= 0) {
         setDlReport({ ok: false, via: "none", error: "restored 0 bytes — the container holds no data" });
@@ -417,11 +434,14 @@ export function SendPage(): JSX.Element {
             </p>
             <button
               className="btn-download"
-              onClick={() =>
-                void downloadBlob(convResult.fileName, convResult.parts as unknown as BlobPart[], "application/octet-stream").then(
-                  reportDownload
-                )
-              }
+              onClick={() => {
+                const r = convResult;
+                if (!r) return;
+                const report = r.file
+                  ? downloadFile(r.fileName, r.file)
+                  : downloadBlob(r.fileName, (r.parts ?? []) as unknown as BlobPart[], "application/octet-stream");
+                void report.then(reportDownload);
+              }}
             >
               Download {convResult.fileName}
             </button>
