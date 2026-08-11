@@ -7,6 +7,7 @@ import {
   transcodeStaged,
   uploadFileChunked,
   type DownloadReport,
+  type ProgressFn,
 } from "./download";
 import { cleanupStaleWrapFiles, closeOpfsOutFile, createOpfsOutFile, opfsAvailable } from "./opfs";
 
@@ -77,6 +78,8 @@ export function SendPage(): JSX.Element {
   const [convProgress, setConvProgress] = useState(0);
   const [convError, setConvError] = useState<string | undefined>();
   const [dlReport, setDlReport] = useState<DownloadReport | null>(null);
+  const [dlBusy, setDlBusy] = useState<"wrap" | "conv" | null>(null);
+  const [dlPct, setDlPct] = useState(0);
   const [wrapCompress, setWrapCompress] = useState(true);
   const [wrapStep, setWrapStep] = useState("");
   const [compressedOrigSize, setCompressedOrigSize] = useState<number | null>(null);
@@ -87,10 +90,31 @@ export function SendPage(): JSX.Element {
 
   const reportDownload = (r: DownloadReport): void => {
     setDlReport(r);
+    setDlBusy(null);
     if (r.ok) {
       window.setTimeout(() => setDlReport(null), 15_000);
     }
   };
+
+  /** One download at a time: immediate feedback, live progress, button locked. */
+  const startDownload = useCallback(
+    (panel: "wrap" | "conv") => {
+      if (dlBusy) return;
+      const r = panel === "wrap" ? wrapResult : convResult;
+      if (!r) return;
+      setDlBusy(panel);
+      setDlPct(0);
+      setDlReport(null);
+      const onProgress: ProgressFn = (written, total) =>
+        setDlPct(total > 0 ? Math.min(100, Math.round((written / total) * 100)) : 0);
+      const rName = panel === "wrap" ? (r as WrapResult).containerName : (r as UnwrapResult).fileName;
+      const job: Promise<DownloadReport> = r.file
+        ? downloadFile(rName, r.file, onProgress)
+        : downloadBlob(rName, (r.parts ?? []) as unknown as BlobPart[], "application/octet-stream", onProgress);
+      void job.then(reportDownload);
+    },
+    [dlBusy, wrapResult, convResult]
+  );
 
   const wrap = useCallback(async (f: File | null) => {
     if (!f || busy.current) return;
@@ -204,20 +228,6 @@ export function SendPage(): JSX.Element {
       busy.current = false;
     }
   }, [wrapCompress]);
-
-  const redownload = useCallback(() => {
-    const r = wrapResult;
-    if (!r) return;
-    // Big containers are disk-backed: stream from disk, never through RAM.
-    // Small ones use the in-memory parts. Both follow the same reliable
-    // ladder: native picker → server (16 MiB slices) → anchor.
-    if (r.file) {
-      void downloadFile(r.containerName, r.file).then(reportDownload);
-      return;
-    }
-    if (!r.parts) return;
-    void downloadBlob(r.containerName, r.parts as unknown as BlobPart[], "application/octet-stream").then(reportDownload);
-  }, [wrapResult]);
 
   const convert = useCallback(async (f: File | null) => {
     if (!f || busy.current) return;
@@ -367,9 +377,21 @@ export function SendPage(): JSX.Element {
                 ? `Video re-encoded ${formatBytes(wrapResult.originalSize)} → ${formatBytes(compressedOrigSize)}, then packaged → ${formatBytes(wrapResult.containerSize)}. The .zui is ready — download it:`
                 : `Packaged ${formatBytes(wrapResult.originalSize)} → ${formatBytes(wrapResult.containerSize)}. The .zui is ready — download it:`}
             </p>
-            <button className="btn-download" onClick={redownload}>
-              Download {wrapResult.containerName}
+            <button
+              className="btn-download"
+              disabled={dlBusy !== null}
+              onClick={() => startDownload("wrap")}
+            >
+              {dlBusy === "wrap" ? `Saving… ${dlPct}%` : `Download ${wrapResult.containerName}`}
             </button>
+            {dlBusy === "wrap" && (
+              <div className="progress-wrap">
+                <div className="progress-bar">
+                  <div className="progress-fill" style={{ width: `${dlPct}%` }} />
+                </div>
+                <span className="progress-label">Saving {wrapResult.containerName} to disk… {dlPct}%</span>
+              </div>
+            )}
             {dlReport && (
               <p className={`resume-msg${dlReport.ok ? " dl-ok" : ""}`}>
                 {dlReport.ok
@@ -441,17 +463,19 @@ export function SendPage(): JSX.Element {
             </p>
             <button
               className="btn-download"
-              onClick={() => {
-                const r = convResult;
-                if (!r) return;
-                const report = r.file
-                  ? downloadFile(r.fileName, r.file)
-                  : downloadBlob(r.fileName, (r.parts ?? []) as unknown as BlobPart[], "application/octet-stream");
-                void report.then(reportDownload);
-              }}
+              disabled={dlBusy !== null}
+              onClick={() => startDownload("conv")}
             >
-              Download {convResult.fileName}
+              {dlBusy === "conv" ? `Saving… ${dlPct}%` : `Download ${convResult.fileName}`}
             </button>
+            {dlBusy === "conv" && (
+              <div className="progress-wrap">
+                <div className="progress-bar">
+                  <div className="progress-fill" style={{ width: `${dlPct}%` }} />
+                </div>
+                <span className="progress-label">Saving {convResult.fileName} to disk… {dlPct}%</span>
+              </div>
+            )}
             {dlReport && (
               <p className={`resume-msg${dlReport.ok ? " dl-ok" : ""}`}>
                 {dlReport.ok

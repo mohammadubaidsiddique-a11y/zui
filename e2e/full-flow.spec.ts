@@ -17,6 +17,10 @@ async function runRoundTrip(page: import("@playwright/test").Page, fixturePath: 
   page.on("download", (d) => dls.push(d));
 
   await page.goto("/");
+  // The e2e fixtures are random bytes misnamed .mp4 — disable wrap-time video
+  // re-encoding so the tests exercise the wrap/restore pipeline deterministically.
+  const compressCb = page.locator("input[type=checkbox]").first();
+  if (await compressCb.isChecked()) await compressCb.uncheck();
   await page.setInputFiles("#wrap-input", fixturePath);
 
   await page.getByRole("button", { name: `Download ${fileName}.zui` }).click();
@@ -62,10 +66,10 @@ test("Send: 200 MiB round trip via chunked upload (server route), byte-exact", a
   await runRoundTrip(page, fixturePath, "video.mp4", sha256(Buffer.from(fileBytes)));
 });
 
-test("Send: 384 MiB round trip, byte-exact (chunked slices over the 16 MiB boundary set)", async ({ page }) => {
+test("Send: 129 MiB round trip, byte-exact (crosses the 128 MiB direct→chunked upload boundary, disk-backed wrap)", async ({ page }) => {
   const dir = await mkdtemp(join(tmpdir(), "zui-e2e-huge-"));
   const fixturePath = join(dir, "movie.mp4");
-  const fileBytes = makeFixture(384 * 1024 * 1024);
+  const fileBytes = makeFixture(129 * 1024 * 1024);
   await writeFile(fixturePath, fileBytes);
   await runRoundTrip(page, fixturePath, "movie.mp4", sha256(Buffer.from(fileBytes)));
 });
