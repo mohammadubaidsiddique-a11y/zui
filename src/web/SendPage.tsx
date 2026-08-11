@@ -5,7 +5,6 @@ import {
   downloadBlob,
   downloadFile,
   transcodeStaged,
-  triggerDownload,
   uploadFileChunked,
   type DownloadReport,
 } from "./download";
@@ -78,8 +77,9 @@ export function SendPage(): JSX.Element {
   const [convProgress, setConvProgress] = useState(0);
   const [convError, setConvError] = useState<string | undefined>();
   const [dlReport, setDlReport] = useState<DownloadReport | null>(null);
-  const [transMode, setTransMode] = useState<"compress" | "enhance" | "frame" | null>(null);
-  const [transError, setTransError] = useState<string | undefined>();
+  const [wrapCompress, setWrapCompress] = useState(true);
+  const [wrapStep, setWrapStep] = useState("");
+  const [compressedOrigSize, setCompressedOrigSize] = useState<number | null>(null);
 
   const [dragOver, setDragOver] = useState<"wrap" | "conv" | null>(null);
   const busy = useRef(false);
@@ -100,11 +100,37 @@ export function SendPage(): JSX.Element {
     setWrapProgress(0);
     setWrapResult(null);
     setWrapError(undefined);
+    setWrapStep("");
+    setCompressedOrigSize(null);
     try {
+      // Optional real compression at wrap time: videos are re-encoded to a
+      // smaller H.264 on the server BEFORE packaging, so the .zui itself is
+      // genuinely smaller and restore returns that compressed video. Lossless
+      // wrapping remains the fallback when the server can't re-encode.
+      let wrapsFile = f;
+      if (wrapCompress && VIDEO_EXT.test(f.name)) {
+        try {
+          setWrapStep("re-encoding video to smaller H.264 on the server…");
+          const { id } = await uploadFileChunked(f.name, f);
+          const { url, bytes: reBytes } = await transcodeStaged(id, "compress");
+          const res = await fetch(url);
+          if (!res.ok) throw new Error(`server re-encode download failed (HTTP ${res.status})`);
+          const blob = await res.blob();
+          if (blob.size <= 0 || blob.size >= f.size) {
+            throw new Error(`re-encode was not smaller (${blob.size} bytes)`);
+          }
+          void reBytes;
+          wrapsFile = new File([blob], f.name, { type: f.type || "video/mp4" });
+          setCompressedOrigSize(wrapsFile.size);
+        } catch (e) {
+          setWrapError(`Video re-encode failed (${(e as Error).message}) — wrapping the original losslessly instead.`);
+          wrapsFile = f;
+        }
+      }
       // Instant path: already-compressed media (video/audio/archives) is
       // entropy-probed and packaged WITHOUT deflate — no CPU burn on 2GB,
       // and the result honestly says "stored as-is" instead of pretending.
-      const probeSample = new Uint8Array(await f.slice(0, Math.min(f.size, 512 * 1024)).arrayBuffer());
+      const probeSample = new Uint8Array(await wrapsFile.slice(0, Math.min(wrapsFile.size, 512 * 1024)).arrayBuffer());
       const compression = probeCompressible(probeSample) ? ("deflate-raw" as const) : ("none" as const);
       setWrapMode(compression);
 
@@ -114,7 +140,7 @@ export function SendPage(): JSX.Element {
       const memoryParts: Uint8Array[] = [];
       let total = 0;
       const diskOut =
-        f.size > 64 * 1024 * 1024 && (await opfsAvailable()) ? await createOpfsOutFile("zui-wrap") : null;
+        wrapsFile.size > 64 * 1024 * 1024 && (await opfsAvailable()) ? await createOpfsOutFile("zui-wrap") : null;
       if (diskOut) await cleanupStaleWrapFiles(diskOut.name);
       const sink: ByteSink = diskOut
         ? {
@@ -132,10 +158,10 @@ export function SendPage(): JSX.Element {
           };
 
       await encodeZui(
-        () => fileSource(f, setWrapProgress),
+        () => fileSource(wrapsFile, setWrapProgress),
         {
           fileName: f.name,
-          mimeType: f.type || "application/octet-stream",
+          mimeType: wrapsFile.type || "application/octet-stream",
           compression,
         },
         sink
@@ -177,7 +203,7 @@ export function SendPage(): JSX.Element {
     } finally {
       busy.current = false;
     }
-  }, []);
+  }, [wrapCompress]);
 
   const redownload = useCallback(() => {
     const r = wrapResult;
@@ -192,37 +218,6 @@ export function SendPage(): JSX.Element {
     if (!r.parts) return;
     void downloadBlob(r.containerName, r.parts as unknown as BlobPart[], "application/octet-stream").then(reportDownload);
   }, [wrapResult]);
-
-  const transcodeVideo = useCallback((mode: "compress" | "enhance" | "frame") => {
-    const r = convResult;
-    if (!r || transMode) return;
-    setTransMode(mode);
-    setTransError(undefined);
-    void (async () => {
-      try {
-        const file =
-          r.file ?? new File((r.parts ?? []) as unknown as BlobPart[], r.fileName, { type: "video/mp4" });
-        const { id } = await uploadFileChunked(r.fileName, file);
-        const { url, bytes } = await transcodeStaged(id, mode);
-        const stem = r.fileName.replace(VIDEO_EXT, "");
-        const outName =
-          mode === "frame"
-            ? `${stem}-frame.jpg`
-            : `${stem}${mode === "enhance" ? "-enhanced" : "-compressed"}.mp4`;
-        triggerDownload(outName, url);
-        reportDownload({
-          ok: true,
-          via: "server",
-          bytes,
-          detail: `${mode === "frame" ? "frame exported" : `${mode} complete`} — download started via server`,
-        });
-      } catch (err) {
-        setTransError((err as Error).message);
-      } finally {
-        setTransMode(null);
-      }
-    })();
-  }, [convResult, transMode]);
 
   const convert = useCallback(async (f: File | null) => {
     if (!f || busy.current) return;
@@ -322,10 +317,9 @@ export function SendPage(): JSX.Element {
             <>
               <div className="dropzone-title">{wrapResult.originalName}</div>
               <div className="dropzone-subtitle">
-                {formatBytes(wrapResult.originalSize)} → {formatBytes(wrapResult.containerSize)}{" "}
-                {wrapMode === "deflate-raw" && wrapResult.containerSize < wrapResult.originalSize
-                  ? "(deflate-compressed)"
-                  : "(stored as-is — this data is already compressed, so lossless packaging can't shrink it)"}
+                {compressedOrigSize
+                  ? `original ${formatBytes(wrapResult.originalSize)} → re-encoded ${formatBytes(compressedOrigSize)} (H.264) → .zui ${formatBytes(wrapResult.containerSize)}`
+                  : `${formatBytes(wrapResult.originalSize)} → ${formatBytes(wrapResult.containerSize)} ${wrapMode === "deflate-raw" && wrapResult.containerSize < wrapResult.originalSize ? "(deflate-compressed)" : "(stored as-is — this data is already compressed, so lossless packaging can't shrink it)"}`}
               </div>
             </>
           ) : (
@@ -339,15 +333,27 @@ export function SendPage(): JSX.Element {
           )}
         </div>
 
+        <label className="compress-opt">
+          <input
+            type="checkbox"
+            checked={wrapCompress}
+            disabled={wrapState === "busy"}
+            onChange={(e) => setWrapCompress(e.target.checked)}
+          />
+          Compress videos while packaging — the .zui holds a smaller re-encoded H.264 video
+        </label>
+
         {wrapState === "busy" && (
           <div className="progress-wrap">
             <div className="progress-bar">
               <div className="progress-fill" style={{ width: `${wrapPct}%` }} />
             </div>
             <span className="progress-label">
-              {wrapMode === "none"
-                ? `packaging ${formatBytes(wrapBytes)} / ${formatBytes(wrapFileRef.current?.size ?? 0)} — already-compressed data can't shrink, stored raw… ${wrapPct}%`
-                : `compressing ${formatBytes(wrapBytes)} / ${formatBytes(wrapFileRef.current?.size ?? 0)}… ${wrapPct}%`}
+              {wrapStep
+                ? `${wrapStep}`
+                : wrapMode === "none"
+                  ? `packaging ${formatBytes(wrapBytes)} / ${formatBytes(wrapFileRef.current?.size ?? 0)} — already-compressed data can't shrink, stored raw… ${wrapPct}%`
+                  : `compressing ${formatBytes(wrapBytes)} / ${formatBytes(wrapFileRef.current?.size ?? 0)}… ${wrapPct}%`}
             </span>
           </div>
         )}
@@ -357,8 +363,9 @@ export function SendPage(): JSX.Element {
         {wrapState === "done" && wrapResult && (
           <div className="wrap-result">
             <p className="wrap-line">
-              Compressed {formatBytes(wrapResult.originalSize)} → {formatBytes(wrapResult.containerSize)}.
-              The .zui is ready — download it:
+              {compressedOrigSize
+                ? `Video re-encoded ${formatBytes(wrapResult.originalSize)} → ${formatBytes(compressedOrigSize)}, then packaged → ${formatBytes(wrapResult.containerSize)}. The .zui is ready — download it:`
+                : `Packaged ${formatBytes(wrapResult.originalSize)} → ${formatBytes(wrapResult.containerSize)}. The .zui is ready — download it:`}
             </p>
             <button className="btn-download" onClick={redownload}>
               Download {wrapResult.containerName}
@@ -445,42 +452,6 @@ export function SendPage(): JSX.Element {
             >
               Download {convResult.fileName}
             </button>
-            {VIDEO_EXT.test(convResult.fileName) && (
-              <>
-                <p className="wrap-line">Prefer a polished version? Restore with enhancement applied:</p>
-                <div className="trans-actions">
-                  <button
-                    className="btn-download"
-                    disabled={transMode !== null}
-                    onClick={() => transcodeVideo("enhance")}
-                  >
-                    Restore + Enhance (1080p, denoise)
-                  </button>
-                  <button
-                    className="btn-download"
-                    disabled={transMode !== null}
-                    onClick={() => transcodeVideo("compress")}
-                  >
-                    Restore + Compress (smaller H.264)
-                  </button>
-                  <button
-                    className="btn-download"
-                    disabled={transMode !== null}
-                    onClick={() => transcodeVideo("frame")}
-                  >
-                    Export frame as JPEG
-                  </button>
-                </div>
-              </>
-            )}
-            {transMode && (
-              <p className="resume-msg">
-                {transMode === "frame"
-                  ? "Exporting a frame on the server (ffmpeg)…"
-                  : "Enhancing on the server (ffmpeg)… this can take a while for big videos."}
-              </p>
-            )}
-            {transError && <p className="resume-msg">✗ transcode failed: {transError}</p>}
             {dlReport && (
               <p className={`resume-msg${dlReport.ok ? " dl-ok" : ""}`}>
                 {dlReport.ok
