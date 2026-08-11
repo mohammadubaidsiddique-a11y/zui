@@ -159,6 +159,58 @@ export async function transcodeStaged(id: string, mode: "compress" | "enhance" |
 }
 
 /**
+ * Streams a File (disk-backed container, e.g. from OPFS) to the user's disk
+ * without ever loading it into RAM: picker writes in 4 MiB slices, server
+ * path uploads 16 MiB slices, anchor falls back to a blob URL of the File.
+ */
+export async function downloadFile(name: string, file: File): Promise<DownloadReport> {
+  const total = file.size;
+  if (total <= 0) return { ok: false, via: "none", error: "nothing to download (0 bytes)" };
+  const pick = (window as { showSaveFilePicker?: (opts?: unknown) => Promise<SaveHandle> }).showSaveFilePicker;
+  const isAutomated = typeof navigator.webdriver === "boolean" ? navigator.webdriver : false;
+  const activation = (navigator as Navigator & { userActivation?: { isActive: boolean } }).userActivation;
+  const activationOk = typeof activation === "undefined" ? true : activation.isActive;
+  if (typeof pick === "function" && !isAutomated && activationOk) {
+    try {
+      const handle = await pick({ suggestedName: name });
+      const writable = await handle.createWritable();
+      const SLICE = 4 * 1024 * 1024;
+      for (let at = 0; at < total; at += SLICE) {
+        await writable.write(file.slice(at, Math.min(at + SLICE, total)));
+      }
+      await writable.close();
+      const written = await handle.getFile();
+      if (written.size !== total) {
+        throw new Error(`selected file only received ${written.size} of ${total} bytes — saving was interrupted`);
+      }
+      return { ok: true, via: "picker", bytes: total, detail: `${total} bytes streamed from disk` };
+    } catch (err) {
+      if ((err as Error).name === "AbortError") return { ok: false, via: "picker", error: "cancelled" };
+      // Picker failed for another reason — fall through to the server route.
+    }
+  }
+  try {
+    const { url } = await uploadFileChunked(name, file);
+    fireAnchor(url, false, name);
+    return { ok: true, via: "server", bytes: total, detail: `${total} bytes streamed via server` };
+  } catch (err) {
+    const serverError = (err as Error)?.message ?? String(err);
+    try {
+      const url = URL.createObjectURL(file);
+      fireAnchor(url, true, name);
+      return {
+        ok: true,
+        via: "anchor",
+        bytes: total,
+        detail: `${total} bytes (server route unavailable: ${serverError})`,
+      };
+    } catch (err2) {
+      return { ok: false, via: "anchor", error: `${serverError}; anchor failed: ${(err2 as Error)?.message ?? err2}` };
+    }
+  }
+}
+
+/**
  * Saves bytes to the user's disk, in order of reliability:
  *  1. Native "Save As" streamed to disk (File System Access API, Chrome/Edge)
  *     — capacity never touches a Blob, no ceilings for multi-GB files.

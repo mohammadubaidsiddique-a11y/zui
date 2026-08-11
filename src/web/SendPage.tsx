@@ -1,7 +1,15 @@
 import { useCallback, useRef, useState, type JSX } from "react";
 import { encodeZui, verifyZui, ZuiDecoder, probeCompressible, type ByteSink, type ByteSource } from "@codec/index";
 import { ShareCard } from "./ShareCard";
-import { downloadBlob, transcodeStaged, triggerDownload, uploadFileChunked, type DownloadReport } from "./download";
+import {
+  downloadBlob,
+  downloadFile,
+  transcodeStaged,
+  triggerDownload,
+  uploadFileChunked,
+  type DownloadReport,
+} from "./download";
+import { cleanupStaleWrapFiles, closeOpfsOutFile, createOpfsOutFile, opfsAvailable } from "./opfs";
 
 const formatBytes = (n: number): string => {
   if (n < 1024) return `${n} B`;
@@ -42,7 +50,8 @@ interface WrapResult {
   originalSize: number;
   containerName: string;
   containerSize: number;
-  parts: Uint8Array[];
+  parts?: Uint8Array[];
+  file?: File;
 }
 
 interface UnwrapResult {
@@ -92,25 +101,34 @@ export function SendPage(): JSX.Element {
     setWrapError(undefined);
     try {
       // Instant path: already-compressed media (video/audio/archives) is
-      // entropy-probed and packaged WITHOUT deflate — no CPU burn on 2GB.
+      // entropy-probed and packaged WITHOUT deflate — no CPU burn on 2GB,
+      // and the result honestly says "stored as-is" instead of pretending.
       const probeSample = new Uint8Array(await f.slice(0, Math.min(f.size, 512 * 1024)).arrayBuffer());
-      const compression =
-        probeCompressible(probeSample) || f.size <= 8 * 1024 * 1024 ? "deflate-raw" : ("none" as const);
+      const compression = probeCompressible(probeSample) ? ("deflate-raw" as const) : ("none" as const);
       setWrapMode(compression);
 
-      // The container is built in memory — pure JS, no OPFS, so a wrap can
-      // never stall at 100% (OPFS writables deadlock Chromium at large
-      // sizes). Download always streams the parts through the server in
-      // 16 MiB slices, so the button can never no-op either.
+      // Big files are built straight to disk (OPFS) and the download streams
+      // from disk in slices — the container never lives in RAM, so a 2.6 GB
+      // wrap can't freeze the tab. Small files stay in memory for speed.
       const memoryParts: Uint8Array[] = [];
       let total = 0;
-      const sink: ByteSink = {
-        write: (b) => {
-          memoryParts.push(Uint8Array.from(b));
-          total += b.byteLength;
-          return Promise.resolve();
-        },
-      };
+      const diskOut =
+        f.size > 64 * 1024 * 1024 && (await opfsAvailable()) ? await createOpfsOutFile("zui-wrap") : null;
+      if (diskOut) await cleanupStaleWrapFiles(diskOut.name);
+      const sink: ByteSink = diskOut
+        ? {
+            write: (b) => {
+              total += b.byteLength;
+              return diskOut.writable.write(b as unknown as Uint8Array<ArrayBuffer>);
+            },
+          }
+        : {
+            write: (b) => {
+              memoryParts.push(Uint8Array.from(b));
+              total += b.byteLength;
+              return Promise.resolve();
+            },
+          };
 
       await encodeZui(
         () => fileSource(f, setWrapProgress),
@@ -121,17 +139,23 @@ export function SendPage(): JSX.Element {
         },
         sink
       );
+      if (diskOut) await closeOpfsOutFile(diskOut);
       if (total <= 0) throw new Error("empty container produced");
 
       // Prove the container is valid BEFORE offering the Download button —
       // a broken or zero-byte .zui must never be downloadable.
-      const partsSource = (): ByteSource => ({
-        async *[Symbol.asyncIterator]() {
-          for (const part of memoryParts) yield part;
-        },
-      });
+      const diskFile = diskOut ? await diskOut.handle.getFile() : null;
+      const partsSource = (): ByteSource =>
+        diskFile
+          ? fileSource(diskFile)
+          : {
+              async *[Symbol.asyncIterator]() {
+                for (const part of memoryParts) yield part;
+              },
+            };
       const check = await verifyZui(partsSource());
       if (!check.valid) {
+        if (diskOut) await cleanupStaleWrapFiles(null);
         throw new Error(`container failed self-check: ${check.errors.join("; ")}`);
       }
 
@@ -141,7 +165,8 @@ export function SendPage(): JSX.Element {
         originalSize: f.size,
         containerName,
         containerSize: total,
-        parts: memoryParts,
+        parts: diskFile ? undefined : memoryParts,
+        file: diskFile ?? undefined,
       };
       setWrapResult(result);
       setWrapState("done");
@@ -156,10 +181,14 @@ export function SendPage(): JSX.Element {
   const redownload = useCallback(() => {
     const r = wrapResult;
     if (!r) return;
+    // Big containers are disk-backed: stream from disk, never through RAM.
+    // Small ones use the in-memory parts. Both follow the same reliable
+    // ladder: native picker → server (16 MiB slices) → anchor.
+    if (r.file) {
+      void downloadFile(r.containerName, r.file).then(reportDownload);
+      return;
+    }
     if (!r.parts) return;
-    // Reliable ladder: native picker → server-mediated → anchor. Large
-    // payloads go through the server in 16 MiB slices, so this never
-    // no-ops and never produces a zero-byte file.
     void downloadBlob(r.containerName, r.parts as unknown as BlobPart[], "application/octet-stream").then(reportDownload);
   }, [wrapResult]);
 
@@ -276,7 +305,10 @@ export function SendPage(): JSX.Element {
             <>
               <div className="dropzone-title">{wrapResult.originalName}</div>
               <div className="dropzone-subtitle">
-                {formatBytes(wrapResult.originalSize)} → {formatBytes(wrapResult.containerSize)} (compressed .zui)
+                {formatBytes(wrapResult.originalSize)} → {formatBytes(wrapResult.containerSize)}{" "}
+                {wrapMode === "deflate-raw" && wrapResult.containerSize < wrapResult.originalSize
+                  ? "(deflate-compressed)"
+                  : "(stored as-is — this data is already compressed, so lossless packaging can't shrink it)"}
               </div>
             </>
           ) : (
