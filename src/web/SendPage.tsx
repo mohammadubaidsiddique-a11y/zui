@@ -71,7 +71,7 @@ export function SendPage(): JSX.Element {
   const [convProgress, setConvProgress] = useState(0);
   const [convError, setConvError] = useState<string | undefined>();
   const [dlReport, setDlReport] = useState<DownloadReport | null>(null);
-  const [transMode, setTransMode] = useState<"compress" | "enhance" | null>(null);
+  const [transMode, setTransMode] = useState<"compress" | "enhance" | "frame" | null>(null);
   const [transError, setTransError] = useState<string | undefined>();
 
   const [dragOver, setDragOver] = useState<"wrap" | "conv" | null>(null);
@@ -187,7 +187,7 @@ export function SendPage(): JSX.Element {
     }
   }, [wrapResult]);
 
-  const transcodeVideo = useCallback((mode: "compress" | "enhance") => {
+  const transcodeVideo = useCallback((mode: "compress" | "enhance" | "frame") => {
     const r = convResult;
     if (!r || transMode) return;
     setTransMode(mode);
@@ -197,9 +197,18 @@ export function SendPage(): JSX.Element {
         const file = new File(r.parts as unknown as BlobPart[], r.fileName, { type: "video/mp4" });
         const { id } = await uploadFileChunked(r.fileName, file);
         const { url, bytes } = await transcodeStaged(id, mode);
-        const outName = `${r.fileName.replace(VIDEO_EXT, "")}${mode === "enhance" ? "-enhanced" : "-compressed"}.mp4`;
+        const stem = r.fileName.replace(VIDEO_EXT, "");
+        const outName =
+          mode === "frame"
+            ? `${stem}-frame.jpg`
+            : `${stem}${mode === "enhance" ? "-enhanced" : "-compressed"}.mp4`;
         triggerDownload(outName, url);
-        reportDownload({ ok: true, via: "server", bytes, detail: `${mode} complete — download started via server` });
+        reportDownload({
+          ok: true,
+          via: "server",
+          bytes,
+          detail: `${mode === "frame" ? "frame exported" : `${mode} complete`} — download started via server`,
+        });
       } catch (err) {
         setTransError((err as Error).message);
       } finally {
@@ -384,8 +393,8 @@ export function SendPage(): JSX.Element {
         {convState === "done" && convResult && (
           <div className="wrap-result">
             <p className="wrap-line">
-              Original restored: <strong>{formatBytes(convResult.size)}</strong> — verified and saved with its
-              original name <strong>{convResult.fileName}</strong>. Download it:
+              Restored: <strong>{formatBytes(convResult.size)}</strong> — the original is back, byte-exact and
+              SHA-256 verified. Download it as-is:
             </p>
             <button
               className="btn-download"
@@ -398,24 +407,40 @@ export function SendPage(): JSX.Element {
               Download {convResult.fileName}
             </button>
             {VIDEO_EXT.test(convResult.fileName) && (
-              <div className="trans-actions">
-                <button
-                  className="btn-download"
-                  disabled={transMode !== null}
-                  onClick={() => transcodeVideo("compress")}
-                >
-                  Compress video (H.264, smaller)
-                </button>
-                <button
-                  className="btn-download"
-                  disabled={transMode !== null}
-                  onClick={() => transcodeVideo("enhance")}
-                >
-                  Enhance video (1080p, denoise)
-                </button>
-              </div>
+              <>
+                <p className="wrap-line">Prefer a polished version? Restore with enhancement applied:</p>
+                <div className="trans-actions">
+                  <button
+                    className="btn-download"
+                    disabled={transMode !== null}
+                    onClick={() => transcodeVideo("enhance")}
+                  >
+                    Restore + Enhance (1080p, denoise)
+                  </button>
+                  <button
+                    className="btn-download"
+                    disabled={transMode !== null}
+                    onClick={() => transcodeVideo("compress")}
+                  >
+                    Restore + Compress (smaller H.264)
+                  </button>
+                  <button
+                    className="btn-download"
+                    disabled={transMode !== null}
+                    onClick={() => transcodeVideo("frame")}
+                  >
+                    Export frame as JPEG
+                  </button>
+                </div>
+              </>
             )}
-            {transMode && <p className="resume-msg">Transcoding on the server (ffmpeg)… this can take a while.</p>}
+            {transMode && (
+              <p className="resume-msg">
+                {transMode === "frame"
+                  ? "Exporting a frame on the server (ffmpeg)…"
+                  : "Enhancing on the server (ffmpeg)… this can take a while for big videos."}
+              </p>
+            )}
             {transError && <p className="resume-msg">✗ transcode failed: {transError}</p>}
             {dlReport && (
               <p className={`resume-msg${dlReport.ok ? " dl-ok" : ""}`}>

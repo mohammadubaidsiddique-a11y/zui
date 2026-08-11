@@ -140,8 +140,8 @@ export async function uploadFileChunked(name: string, file: File): Promise<{ url
   return { url: data.url, id: data.id ?? id };
 }
 
-/** Asks the server to transcode a staged video with ffmpeg (compress/enhance). */
-export async function transcodeStaged(id: string, mode: "compress" | "enhance"): Promise<{ url: string; bytes: number }> {
+/** Asks the server to transcode a staged video with ffmpeg (compress/enhance/frame). */
+export async function transcodeStaged(id: string, mode: "compress" | "enhance" | "frame"): Promise<{ url: string; bytes: number }> {
   const res = await fetch(`${STAGE_ROOT}/chunked/${id}/transcode?mode=${mode}`, { method: "POST" });
   if (!res.ok) throw new Error(`transcode failed (HTTP ${res.status})`);
   const data = (await res.json()) as { url?: string; bytes?: number };

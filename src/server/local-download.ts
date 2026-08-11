@@ -10,7 +10,7 @@ import { ApiError } from "@server/transfers";
 const ID_RE = /^[0-9a-f]{64}$/;
 const TTL_MS = 30 * 60 * 1000;
 
-export type TranscodeMode = "compress" | "enhance";
+export type TranscodeMode = "compress" | "enhance" | "frame";
 
 /**
  * Staging store for browser-side downloads that cannot be delivered as Blob
@@ -128,27 +128,33 @@ export function createTempDownloadStore(dataDir: string): TempDownloadStore {
       if (!ID_RE.test(id)) throw new ApiError("invalid download id", 400, "bad_request");
       const meta = await readMeta(id);
       if (meta.bytes === 0) throw new ApiError("empty payload", 400, "bad_request");
-      const outName = sanitizeName(
-        `${basename(meta.name, extname(meta.name)) || "video"}${mode === "enhance" ? "-enhanced" : "-compressed"}.mp4`
-      );
+      const outName =
+        mode === "frame"
+          ? sanitizeName(`${basename(meta.name, extname(meta.name)) || "video"}-frame.jpg`)
+          : sanitizeName(
+              `${basename(meta.name, extname(meta.name)) || "video"}${mode === "enhance" ? "-enhanced" : "-compressed"}.mp4`
+            );
       const outId = randomBytes(32).toString("hex");
       const outPath = binPath(outId);
-      const args = [
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-i",
-        binPath(id),
-        ...(mode === "enhance"
-          ? ["-vf", "scale=-2:1080,hqdn3d=4:3:6:4.5", "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-c:a", "aac", "-b:a", "192k"]
-          : ["-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-c:a", "aac", "-b:a", "128k"]),
-        "-movflags",
-        "+faststart",
-        "-f",
-        "mp4",
-        "-y",
-        outPath,
-      ];
+      const args =
+        mode === "frame"
+          ? ["-hide_banner", "-loglevel", "error", "-i", binPath(id), "-frames:v", "1", "-q:v", "2", "-f", "mjpeg", "-y", outPath]
+          : [
+              "-hide_banner",
+              "-loglevel",
+              "error",
+              "-i",
+              binPath(id),
+              ...(mode === "enhance"
+                ? ["-vf", "scale=-2:1080,hqdn3d=4:3:6:4.5", "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-c:a", "aac", "-b:a", "192k"]
+                : ["-c:v", "libx264", "-preset", "veryfast", "-crf", "28", "-c:a", "aac", "-b:a", "128k"]),
+              "-movflags",
+              "+faststart",
+              "-f",
+              "mp4",
+              "-y",
+              outPath,
+            ];
       const stderr: string[] = [];
       const proc = spawn(ffmpegPath, args, { stdio: ["ignore", "ignore", "pipe"] });
       proc.stderr.setEncoding("utf8");
@@ -165,7 +171,11 @@ export function createTempDownloadStore(dataDir: string): TempDownloadStore {
           });
         });
         const size = (await stat(outPath)).size;
-        await writeFile(metaPath(outId), JSON.stringify({ name: outName, mime: "video/mp4", bytes: size, chunked: false }), "utf8");
+        await writeFile(
+          metaPath(outId),
+          JSON.stringify({ name: outName, mime: mode === "frame" ? "image/jpeg" : "video/mp4", bytes: size, chunked: false }),
+          "utf8"
+        );
         scheduleSweep(outId);
         await rm(binPath(id), { force: true });
         await rm(metaPath(id), { force: true });

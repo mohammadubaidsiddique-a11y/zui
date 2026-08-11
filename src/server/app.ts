@@ -306,8 +306,8 @@ export function createApp(ctx: ZuiAppContext): express.Express {
   api.post("/local-download/chunked/:id/transcode", limits.general, async (req, res, next) => {
     try {
       const mode = req.query.mode;
-      if (mode !== "compress" && mode !== "enhance") {
-        throw new ApiError("mode must be compress or enhance", 400, "bad_request");
+      if (mode !== "compress" && mode !== "enhance" && mode !== "frame") {
+        throw new ApiError("mode must be compress, enhance or frame", 400, "bad_request");
       }
       const { url, bytes } = await tempDownloads.transcode(req.params.id as string, mode, config.ffmpeg);
       res.json({ url, bytes });
